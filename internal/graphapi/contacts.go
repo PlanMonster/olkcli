@@ -31,7 +31,7 @@ var contactSelectFields = []string{
 
 // buildEmailAddresses validates and converts a slice of email strings to Graph EmailAddressable objects.
 func buildEmailAddresses(emails []string) ([]models.EmailAddressable, error) {
-	var addrs []models.EmailAddressable
+	addrs := make([]models.EmailAddressable, 0, len(emails))
 	for _, e := range emails {
 		if e == "" {
 			continue
@@ -112,7 +112,7 @@ func (c *Client) ListContacts(ctx context.Context, top, skip int32, orderBy stri
 		return nil, fmt.Errorf("listing contacts: %w", err)
 	}
 
-	var contacts []Contact
+	contacts := make([]Contact, 0, len(resp.GetValue()))
 	for _, ct := range resp.GetValue() {
 		contacts = append(contacts, convertContact(ct))
 	}
@@ -545,7 +545,7 @@ func (c *Client) SearchContacts(ctx context.Context, query string, top int32) ([
 		return nil, fmt.Errorf("searching contacts: %w", err)
 	}
 
-	var contacts []Contact
+	contacts := make([]Contact, 0, len(resp.GetValue()))
 	for _, ct := range resp.GetValue() {
 		contacts = append(contacts, convertContact(ct))
 	}

@@ -121,8 +121,6 @@ func (c *Client) ListMessages(ctx context.Context, opts *ListMessagesOptions) ([
 		QueryParameters: queryParams,
 	}
 
-	var result []MailMessage
-
 	if opts.FolderID != "" {
 		if err := validateID(opts.FolderID, "folder ID"); err != nil {
 			return nil, err
@@ -146,6 +144,7 @@ func (c *Client) ListMessages(ctx context.Context, opts *ListMessagesOptions) ([
 		if err != nil {
 			return nil, fmt.Errorf("listing messages: %w", err)
 		}
+		result := make([]MailMessage, 0, len(resp.GetValue()))
 		for _, msg := range resp.GetValue() {
 			result = append(result, convertMessage(msg))
 		}
@@ -156,6 +155,7 @@ func (c *Client) ListMessages(ctx context.Context, opts *ListMessagesOptions) ([
 	if err != nil {
 		return nil, fmt.Errorf("listing messages: %w", err)
 	}
+	result := make([]MailMessage, 0, len(resp.GetValue()))
 	for _, msg := range resp.GetValue() {
 		result = append(result, convertMessage(msg))
 	}
@@ -364,7 +364,7 @@ func (c *Client) ListMailFolders(ctx context.Context) ([]MailFolder, error) {
 		return nil, fmt.Errorf("listing folders: %w", err)
 	}
 
-	var folders []MailFolder
+	folders := make([]MailFolder, 0, len(resp.GetValue()))
 	for _, f := range resp.GetValue() {
 		folder := MailFolder{
 			DisplayName: derefStr(f.GetDisplayName()),
@@ -520,7 +520,7 @@ func (c *Client) GetAttachments(ctx context.Context, messageID string) ([]Attach
 		return nil, fmt.Errorf("getting attachments: %w", err)
 	}
 
-	var attachments []Attachment
+	attachments := make([]Attachment, 0, len(resp.GetValue()))
 	for _, a := range resp.GetValue() {
 		att := Attachment{
 			Name:        derefStr(a.GetName()),
@@ -649,7 +649,7 @@ func convertMessage(msg models.Messageable) MailMessage {
 }
 
 func makeRecipients(emails []string) ([]models.Recipientable, error) {
-	var recipients []models.Recipientable
+	recipients := make([]models.Recipientable, 0, len(emails))
 	for _, email := range emails {
 		if err := ValidateEmail(email); err != nil {
 			return nil, err
