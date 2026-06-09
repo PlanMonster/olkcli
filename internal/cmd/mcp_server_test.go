@@ -195,3 +195,24 @@ func enumContains(s *jsonschema.Schema, want string) bool {
 	}
 	return false
 }
+
+func TestToolSchema_ConciseInjectedForReadOnly(t *testing.T) {
+	read := &toolBinding{name: "mail_list", path: []string{"mail", "list"}, node: leafByPath(t, "mail", "list"), readOnly: true}
+	if _, ok := toolSchema(read).Properties[conciseArg]; !ok {
+		t.Error("read tool schema should include synthetic concise property")
+	}
+	write := &toolBinding{name: "mail_drafts_create", path: []string{"mail", "drafts", "create"}, node: leafByPath(t, "mail", "drafts", "create"), readOnly: false}
+	if _, ok := toolSchema(write).Properties[conciseArg]; ok {
+		t.Error("write tool schema must not include concise property")
+	}
+}
+
+// TestCuratedReadToolCount pins the default (read-only) registry size so the
+// "N read tools" figure in README.md can't silently drift. If you add or remove
+// a read tool, update both this number and the README.
+func TestCuratedReadToolCount(t *testing.T) {
+	const documentedReadTools = 32
+	if got := len(buildBindings(t)); got != documentedReadTools {
+		t.Errorf("default read-only registry has %d tools; expected %d — update README.md and this constant in lockstep", got, documentedReadTools)
+	}
+}
