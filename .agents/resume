@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+go_version="1.26.4"
+golangci_lint_version="2.11.4"
+go_bin="$HOME/.local/opt/go-$go_version/bin/go"
+golangci_lint_bin="$HOME/.local/bin/golangci-lint"
+
+[[ -x "$go_bin" ]] || {
+  echo "Go $go_version is missing; rerun .agents/setup" >&2
+  exit 1
+}
+[[ -x "$golangci_lint_bin" ]] || {
+  echo "golangci-lint $golangci_lint_version is missing; rerun .agents/setup" >&2
+  exit 1
+}
+
+echo "Orb toolchain is ready"
