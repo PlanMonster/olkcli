@@ -207,6 +207,42 @@ olk auth login --browser [--client-id YOUR_CLIENT_ID --tenant-id YOUR_TENANT_ID]
 
 This flow requires the app registration to have a loopback redirect URI (see [Custom App Registration](#custom-app-registration) step 4). If the browser shows error **AADSTS50011** ("redirect URI mismatch") and the CLI times out, the app registration is missing the redirect URI — use `--client-id` with your own registration.
 
+### Access-Token Injection (CI, containers, agent sandboxes)
+
+When an external system already owns the OAuth flow, hand `olk` a short-lived **delegated Graph access token** instead of logging in. In this mode `olk` is a pure consumer of that token:
+
+- it **never** reads or writes the OS keyring, the account files, or the default-account config;
+- it **never** refreshes and **never** persists the token — the token's lifetime is the process's lifetime;
+- no refresh token ever enters the environment, so a disposable container holds nothing durable.
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `OLK_ACCESS_TOKEN` | yes | A delegated Microsoft Graph access token (bearer). Also available as `--access-token`, but prefer the variable: a command line is visible to other processes. |
+| `OLK_ACCESS_TOKEN_EXPIRES_AT` | no | RFC3339 expiry of that token (e.g. `2026-01-01T12:34:56Z`). A past value fails **before** any network call with exit code **77**, so a caller can mint a fresh token and retry. Omit it and Graph's `401` is the authority instead. |
+| `OLK_ACCOUNT_EMAIL` | no | Identity hint (UPN) shown by `olk auth status`. `olk whoami` still resolves the real profile from Graph. |
+
+```bash
+# In a CI job or sandbox: read-only, no prompts, no stored credentials.
+export OLK_ACCESS_TOKEN="$(fetch-token-from-your-broker)"
+export OLK_ACCESS_TOKEN_EXPIRES_AT="2026-01-01T12:34:56Z"
+export OLK_NO_WRITE=1 OLK_NO_INPUT=1
+
+olk mail list --json
+olk auth status
+# Account: user@example.com
+# Status:  Authenticated (injected access token)
+# Expires: 2026-01-01T12:34:56Z
+```
+
+The token must carry the Graph scopes for the commands you run (the same scopes `olk auth login` requests). Every capability guard composes normally — `--no-write`, `--no-send`, `--no-input`, `--wrap-untrusted`, `--enable-commands[-exact]`, `--disable-commands` — and `--mailbox` delegated access keeps working.
+
+Notes:
+
+- `--account` selects among *stored* accounts, so it is rejected in this mode. Use `--mailbox` for delegated access, or `OLK_ACCOUNT_EMAIL` as a display hint.
+- `olk auth login|logout|clean|list` manage stored accounts and refuse to run while `OLK_ACCESS_TOKEN` is set. `olk auth status` reports the injected token.
+- Under `olk mcp`, every tool call rebuilds the credential from the environment, so the same variables apply with no extra configuration. Because the token is not refreshed, keep the server's lifetime shorter than the token's.
+- The token never appears in output, errors, verbose HTTP logs (the `Authorization` header is redacted), or the argv the MCP server builds.
+
 ### Custom App Registration
 
 If your organization blocks the default client ID, or your admin requires apps to be registered under your tenant, you'll need to create your own app registration:
@@ -338,7 +374,7 @@ For common workflows, `olk` provides top-level shortcuts:
 |------|---------|-------------|
 | `--json` | `OLK_JSON` | JSON output |
 | `--plain` | `OLK_PLAIN` | TSV output |
-| `--account EMAIL` | `OLK_ACCOUNT` | Account to use |
+| `--account EMAIL` | `OLK_ACCOUNT` | Account to use (stored accounts only) |
 | `--mailbox EMAIL` | `OLK_MAILBOX` | Target another user's mailbox via delegated access (requires `Mail.Read.Shared` at login) |
 | `-v, --verbose` | `OLK_VERBOSE` | Verbose output |
 | `--dry-run` | `OLK_DRY_RUN` | Dry run mode |
@@ -355,6 +391,9 @@ For common workflows, `olk` provides top-level shortcuts:
 | `--enable-commands CSV` | `OLK_ENABLE_COMMANDS` | Allow only these command prefixes (e.g. `mail,calendar`) |
 | `--enable-commands-exact CSV` | `OLK_ENABLE_COMMANDS_EXACT` | Allow only these exact command paths (e.g. `mail.list,mail.get`) |
 | `--disable-commands CSV` | `OLK_DISABLE_COMMANDS` | Block these command paths (overrides allows) |
+| `--access-token TOKEN` | `OLK_ACCESS_TOKEN` | Use an injected Graph access token; bypasses the keyring entirely ([details](#access-token-injection-ci-containers-agent-sandboxes)) |
+| `--access-token-expires-at TS` | `OLK_ACCESS_TOKEN_EXPIRES_AT` | RFC3339 expiry of the injected token; a past value exits 77 before any request |
+| `--account-email EMAIL` | `OLK_ACCOUNT_EMAIL` | Identity hint (UPN) displayed when a token is injected |
 | | `OLK_KEYRING_PASSWORD` | File-backend keyring password (for headless use) |
 
 These capability guards apply to **every** entry path — the bare CLI, scripts/CI, and the MCP server — so `OLK_NO_WRITE=1 olk --mailbox boss@example.com mail list` is a hard "read this mailbox, never write" guarantee.
