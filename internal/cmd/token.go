@@ -73,7 +73,7 @@ func newTokenMode(f *RootFlags) (*tokenMode, error) {
 		exp, err := time.Parse(time.RFC3339, raw)
 		if err != nil {
 			// Report the expected format, never the value alongside the token.
-			return nil, errors.New("invalid access token expiry: expected RFC3339, e.g. 2026-01-01T12:34:56Z")
+			return nil, errors.New("invalid access token expiry: expected RFC3339, e.g. 2030-01-01T12:34:56Z")
 		}
 		tm.expiresAt = exp
 		if !time.Now().Before(exp) {

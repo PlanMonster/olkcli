@@ -218,20 +218,20 @@ When an external system already owns the OAuth flow, hand `olk` a short-lived **
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `OLK_ACCESS_TOKEN` | yes | A delegated Microsoft Graph access token (bearer). Also available as `--access-token`, but prefer the variable: a command line is visible to other processes. |
-| `OLK_ACCESS_TOKEN_EXPIRES_AT` | no | RFC3339 expiry of that token (e.g. `2026-01-01T12:34:56Z`). A past value fails **before** any network call with exit code **77**, so a caller can mint a fresh token and retry. Omit it and Graph's `401` is the authority instead. |
+| `OLK_ACCESS_TOKEN_EXPIRES_AT` | no | RFC3339 expiry of that token (e.g. `2030-01-01T12:34:56Z`). A past value fails **before** any network call with exit code **77**, so a caller can mint a fresh token and retry. Omit it and Graph's `401` is the authority instead. |
 | `OLK_ACCOUNT_EMAIL` | no | Identity hint (UPN) shown by `olk auth status`. `olk whoami` still resolves the real profile from Graph. |
 
 ```bash
 # In a CI job or sandbox: read-only, no prompts, no stored credentials.
 export OLK_ACCESS_TOKEN="$(fetch-token-from-your-broker)"
-export OLK_ACCESS_TOKEN_EXPIRES_AT="2026-01-01T12:34:56Z"
+export OLK_ACCESS_TOKEN_EXPIRES_AT="2030-01-01T12:34:56Z"
 export OLK_NO_WRITE=1 OLK_NO_INPUT=1
 
 olk mail list --json
 olk auth status
 # Account: user@example.com
 # Status:  Authenticated (injected access token)
-# Expires: 2026-01-01T12:34:56Z
+# Expires: 2030-01-01T12:34:56Z
 ```
 
 The token must carry the Graph scopes for the commands you run (the same scopes `olk auth login` requests). Every capability guard composes normally — `--no-write`, `--no-send`, `--no-input`, `--wrap-untrusted`, `--enable-commands[-exact]`, `--disable-commands` — and `--mailbox` delegated access keeps working.
