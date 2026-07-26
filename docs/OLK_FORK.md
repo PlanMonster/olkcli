@@ -15,6 +15,17 @@ Stock olk has no access-token input. Its env vars (`OLK_CLIENT_ID`, `OLK_TENANT_
 
 ## Agent prompt (copy-paste into the fork repo)
 
+**Stage 1 is done** — this checkout is the fork (`origin PlanMonster/olkcli`, `upstream rlrghb/olkcli`, base `d3594b7`).
+
+**The detailed, file-and-line implementation plan for Stage 2 lives in [OLK_FORK_STAGE2.md](OLK_FORK_STAGE2.md)** (written in ASD-STE100 Simplified Technical English). Use that document as the working spec; the prompt below stays here as the contract summary and as the text to paste into an upstream-facing issue or PR description.
+
+Four decisions were left open by this prompt and are resolved in the Stage 2 document:
+
+1. Rule "no keyring or config reads" applies to account data and to all writes. `Timezone()` (`internal/cmd/root.go:161`) may still read `config.json` for display.
+2. `OLK_ACCOUNT_EMAIL` is an identity hint for `auth status` and messages only. `whoami` keeps its Graph `/me` lookup.
+3. The expired-token exit code is 77.
+4. `--access-token` exists for parity, but the documentation prefers the environment variable, because a command line is visible to other processes.
+
 Paste the block below verbatim as the task prompt for an agent session rooted in the `PlanMonster/olkcli` checkout.
 
 ```text
