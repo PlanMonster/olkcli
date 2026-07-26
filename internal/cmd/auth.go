@@ -31,6 +31,10 @@ type AuthLoginCmd struct {
 }
 
 func (c *AuthLoginCmd) Run(ctx *RunContext) error {
+	if err := refuseInTokenMode(ctx.Flags, "login"); err != nil {
+		return err
+	}
+
 	clientID := c.ClientID
 	if clientID == "" {
 		clientID = config.DefaultClientID
@@ -106,6 +110,10 @@ type AuthLogoutCmd struct {
 }
 
 func (c *AuthLogoutCmd) Run(ctx *RunContext) error {
+	if err := refuseInTokenMode(ctx.Flags, "logout"); err != nil {
+		return err
+	}
+
 	cfg, err := ctx.Config()
 	if err != nil {
 		return err
@@ -144,6 +152,10 @@ func (c *AuthLogoutCmd) Run(ctx *RunContext) error {
 type AuthCleanCmd struct{}
 
 func (c *AuthCleanCmd) Run(ctx *RunContext) error {
+	if err := refuseInTokenMode(ctx.Flags, "clean"); err != nil {
+		return err
+	}
+
 	if !ctx.Flags.Force {
 		return fmt.Errorf("this will remove ALL stored accounts and tokens; use --force to confirm")
 	}
@@ -211,6 +223,10 @@ func (c *AuthCleanCmd) Run(ctx *RunContext) error {
 type AuthListCmd struct{}
 
 func (c *AuthListCmd) Run(ctx *RunContext) error {
+	if err := refuseInTokenMode(ctx.Flags, "list"); err != nil {
+		return err
+	}
+
 	cfg, err := ctx.Config()
 	if err != nil {
 		return err
@@ -255,6 +271,17 @@ func (c *AuthListCmd) Run(ctx *RunContext) error {
 type AuthStatusCmd struct{}
 
 func (c *AuthStatusCmd) Run(ctx *RunContext) error {
+	// Token mode has no stored account to inspect: report the injected credential
+	// instead, without touching the keyring or the config.
+	if tm, err := newTokenMode(ctx.Flags); err != nil {
+		return err
+	} else if tm != nil {
+		fmt.Printf("Account: %s\n", outfmt.Sanitize(tm.accountLabel()))
+		fmt.Println("Status:  Authenticated (injected access token)")
+		fmt.Printf("Expires: %s\n", tm.expiryLabel())
+		return nil
+	}
+
 	cfg, err := ctx.Config()
 	if err != nil {
 		return err
