@@ -45,37 +45,65 @@ after an unpublish. Publish a new version to correct a defect.
 ## One-time bootstrap (do this before the first release)
 
 npm Trusted Publishing can only be configured on a package that already exists.
-Therefore a person must create the seven names once by hand. CI publishes every
-version after that.
+CI publishes **through** Trusted Publishing. Therefore the first publish of each
+of the seven names must come from a maintainer's machine. CI publishes every
+version after that, and CI never holds a token.
+
+Publish real tarballs, not placeholders. CI builds all six binaries for you, so
+you do not need a Mac and you create no junk versions.
 
 1. Create the `planmonster` organization on npmjs.org. Enable 2FA on your
    account.
-2. Create a granular access token with write access, or publish interactively
-   and answer the 2FA prompt.
-3. From a clean checkout, stamp and publish placeholder packages:
+2. In the Actions tab, start **Publish (npm, @planmonster)** with the version
+   you intend to ship and `dry_run: true`. The run packs seven tarballs and
+   uploads them as the `npm-tarballs` artifact.
+3. Download and unzip the artifact.
+4. Authenticate, then publish the tarballs in the required order:
 
    ```sh
-   node scripts/build-npm.mjs 0.0.1-bootstrap.0 \
-     --scope @planmonster \
-     --registry https://registry.npmjs.org \
-     --repository PlanMonster/olkcli \
-     --publish --skip-binary-check
-   git checkout -- npm/olk/package.json npm/olk-*/package.json
+   npm login                                # answer the 2FA prompt
+   bash scripts/bootstrap-npm.sh <unzipped-dir> --dry-run   # inspect first
+   bash scripts/bootstrap-npm.sh <unzipped-dir>
    ```
 
-   `--skip-binary-check` permits a publish with no binary. Use it here only.
-4. For each of the seven packages, open Settings on npmjs.com and add a Trusted
+   The script publishes the six binary packages first and the launcher last, and
+   it refuses to run unless all seven tarballs are present.
+5. For each of the seven packages, open Settings on npmjs.com and add a Trusted
    Publisher:
    - Organization or user: `PlanMonster`
    - Repository: `olkcli`
    - Workflow: `publish-npm.yml`
-5. Leave "Publishing access" at the default. Do **not** select "Require
+6. Leave "Publishing access" at the default. Do **not** select "Require
    two-factor authentication and disallow tokens": that turns on staged
    publishing, which makes a person approve every CI publish before consumers
    can install it.
+7. Revoke the token, or run `npm logout`.
 
-After step 5, CI holds no secret. Each publish mints a short-lived credential
+After step 7, CI holds no secret. Each publish mints a short-lived credential
 from the GitHub OIDC identity.
+
+The next tagged release must use a new version, because registry versions are
+immutable. A CI re-run of a version that already exists is safe: it is skipped,
+and the job still succeeds.
+
+### Alternative: reserve the names now, ship later
+
+Use this only to claim the seven names before the code is ready to ship. It
+publishes 373-byte packages that contain `package.json` and an empty `bin/`
+directory, and no binary:
+
+```sh
+node scripts/build-npm.mjs 0.0.1-bootstrap.0 \
+  --scope @planmonster \
+  --registry https://registry.npmjs.org \
+  --repository PlanMonster/olkcli \
+  --publish --skip-binary-check --tag bootstrap
+git checkout -- npm/olk/package.json npm/olk-*/package.json
+```
+
+`--skip-binary-check` permits a publish with no binary. `--tag bootstrap` keeps
+the placeholder off the `latest` tag, so `npm i @planmonster/olkcli` cannot
+install a launcher that has no binary. Never use either option in CI.
 
 ## Release procedure
 
