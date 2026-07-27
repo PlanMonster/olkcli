@@ -28,6 +28,12 @@ if [ -z "$dir" ] || [ ! -d "$dir" ]; then
   echo "usage: bash scripts/bootstrap-npm.sh <dir-with-tarballs> [--dry-run] [--tag <tag>]" >&2
   exit 2
 fi
+# Resolve to an absolute path before building any tarball argument. npm parses a
+# bare relative path like "dist-npm/pkg.tgz" as the GitHub shorthand
+# <owner>/<repo> and tries to clone ssh://git@github.com/dist-npm/pkg.tgz.git,
+# which fails with "code 128 ... Permission denied (publickey)". An absolute
+# path (or a "./" prefix) is unambiguously a file.
+dir="$(cd "$dir" && pwd)"
 shift
 
 dry_run=0

@@ -32,7 +32,7 @@ unscoped upstream packages and for the scoped fork packages.
 
 ## Versioning
 
-The fork must use a version that carries a suffix, for example `0.9.5-pm.1`.
+The fork must use a version that carries a suffix, for example `1.10.0-pm.1`.
 `publish-npm.yml` rejects a bare `X.Y.Z` version. Two reasons:
 
 - Upstream `olkcli` is at 1.10.0. A shared number implies a parity that does not
@@ -108,8 +108,8 @@ install a launcher that has no binary. Never use either option in CI.
 ## Release procedure
 
 ```sh
-git tag npm-v0.9.5-pm.1
-git push origin npm-v0.9.5-pm.1
+git tag npm-v1.10.0-pm.1
+git push origin npm-v1.10.0-pm.1
 ```
 
 The tag prefix is `npm-v`, not `v`, so it does not also fire `release.yml`
@@ -144,7 +144,7 @@ partial failure is safe.
 ### From a Daytona sandbox
 
 ```sh
-npx -y @planmonster/olkcli@0.9.5-pm.1 mail list --json
+npx -y @planmonster/olkcli@1.10.0-pm.1 mail list --json
 ```
 
 Pin the exact version. `@latest` makes an agent runner non-reproducible.
@@ -174,7 +174,7 @@ Read `stdout` for the JSON envelope. Ignore `stderr`, which carries hints only.
 ### As an MCP server
 
 ```sh
-npx -y @planmonster/olkcli@0.9.5-pm.1 mcp
+npx -y @planmonster/olkcli@1.10.0-pm.1 mcp
 ```
 
 The server is read-only by default and always wraps untrusted text.
@@ -182,7 +182,7 @@ The server is read-only by default and always wraps untrusted text.
 ### Baked into a sandbox image
 
 ```sh
-npm i -g @planmonster/olkcli@0.9.5-pm.1
+npm i -g @planmonster/olkcli@1.10.0-pm.1
 ```
 
 This removes the registry round trip from a cold start.

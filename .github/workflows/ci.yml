@@ -90,5 +90,8 @@ jobs:
       - name: Test npm packaging (pack, install, run)
         run: bash scripts/test-npm-package.sh
 
+      - name: Test the npm bootstrap script
+        run: bash scripts/test-bootstrap-npm.sh
+
       - name: Verify the working tree is unchanged
         run: git diff --exit-code
