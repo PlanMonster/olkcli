@@ -8,6 +8,7 @@
 //   --registry <url>          publish/lookup against a non-default registry
 //   --repository owner/name   rewrite repository/homepage/bugs URLs
 //   --access public|restricted
+//   --tag <dist-tag>          publish under a dist-tag other than "latest"
 //   --skip-binary-check       publish binary packages with no binary
 //                             (one-time bootstrap only — see
 //                             docs/npm-publishing.md)
@@ -40,6 +41,19 @@ function flag(name) {
   const i = argv.indexOf(name);
   return i === -1 ? undefined : argv[i + 1];
 }
+// Like flag(), but when the flag is present it must be followed by a real
+// value (not the end of argv, not another option). Returns undefined when the
+// flag is absent.
+function requireValue(name) {
+  const i = argv.indexOf(name);
+  if (i === -1) return undefined;
+  const val = argv[i + 1];
+  if (val === undefined || val.startsWith("-")) {
+    console.error(`${name} requires a value`);
+    process.exit(2);
+  }
+  return val;
+}
 
 const rawVersion = argv.find((a) => !a.startsWith("-")) || process.env.VERSION || process.env.GITHUB_REF_NAME;
 if (!rawVersion) {
@@ -51,6 +65,12 @@ const publish = argv.includes("--publish");
 const registry = flag("--registry") || process.env.NPM_REGISTRY;
 const repository = flag("--repository") || process.env.NPM_REPOSITORY;
 const access = flag("--access") || process.env.NPM_ACCESS || "public";
+// A placeholder or pre-release publish must not claim the "latest" tag, or a
+// consumer running `npm i <pkg>` receives it. An explicit `--tag` must carry a
+// real value: reject a missing or option-like one rather than silently falling
+// back to NPM_TAG or forwarding the next flag (e.g. `--tag --publish`) as a
+// dist-tag.
+const distTag = requireValue("--tag") || process.env.NPM_TAG || "";
 // npm Trusted Publishing can only be configured on a package that already
 // exists, so the very first publish of each name has to happen by hand and may
 // carry no binary. Never set this in the release workflow.
@@ -139,6 +159,7 @@ function npmPublish(pkgDir) {
   }
   console.log(`publishing ${name}@${version} ...`);
   const args = ["publish", "--access", access];
+  if (distTag) args.push("--tag", distTag);
   if (registry) args.push("--registry", registry);
   execFileSync("npm", args, {
     cwd: path.join(npmDir, pkgDir),
