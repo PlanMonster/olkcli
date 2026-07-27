@@ -36,8 +36,15 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) dry_run=1 ;;
     --tag)
+      # Reject a missing or option-like value so `--tag --dry-run` cannot
+      # silently consume `--dry-run` as the dist-tag and proceed with a real
+      # publish.
+      if [ "$#" -lt 2 ] || [[ "$2" == -* ]]; then
+        echo "--tag requires a value" >&2
+        exit 2
+      fi
+      tag="$2"
       shift
-      tag="${1:-}"
       ;;
     *)
       echo "unknown argument: $1" >&2
@@ -47,34 +54,144 @@ while [ $# -gt 0 ]; do
   shift
 done
 
-shopt -s nullglob
-platform_tgz=()
-launcher_tgz=""
-for f in "$dir"/*.tgz; do
-  name="$(basename "$f")"
-  # The launcher package is *olkcli-<version>.tgz; the binary packages are
-  # *olk-<os>-<arch>-<version>.tgz.
-  if [[ "$name" == *olkcli-* ]]; then
-    launcher_tgz="$f"
-  else
-    platform_tgz+=("$f")
-  fi
-done
+# The six platform packages that must be published before the launcher. Bare
+# names; the launcher's npm scope (e.g. "@planmonster/") is prepended below so
+# a scoped and an unscoped build are both validated exactly.
+expected_platforms=(
+  olk-darwin-arm64
+  olk-darwin-x64
+  olk-linux-arm64
+  olk-linux-x64
+  olk-win32-arm64
+  olk-win32-x64
+)
 
-if [ "${#platform_tgz[@]}" -ne 6 ] || [ -z "$launcher_tgz" ]; then
-  echo "expected 6 binary tarballs + 1 launcher tarball in $dir, found:" >&2
-  printf '  %s\n' "$dir"/*.tgz >&2
+# Read "<name>\t<version>" from a tarball's package/package.json. npm (hence
+# node) is a hard dependency of this script, so parsing JSON with node is safe.
+tarball_id() {
+  tar -xzOf "$1" package/package.json 2>/dev/null | node -e '
+    let s = "";
+    process.stdin.on("data", (d) => (s += d));
+    process.stdin.on("end", () => {
+      try {
+        const j = JSON.parse(s);
+        if (!j.name || !j.version) process.exit(1);
+        process.stdout.write(j.name + "\t" + j.version);
+      } catch {
+        process.exit(1);
+      }
+    });
+  '
+}
+
+shopt -s nullglob
+tarballs=()
+for f in "$dir"/*.tgz; do tarballs+=("$f"); done
+if [ "${#tarballs[@]}" -eq 0 ]; then
+  echo "no .tgz tarballs found in $dir" >&2
   exit 1
 fi
 
+# Identify every tarball by the name/version inside its package.json rather than
+# by filename, so an unrelated or mislabelled archive can never stand in for a
+# required package.
+names=()
+vers=()
+files=()
+for f in "${tarballs[@]}"; do
+  if ! pkgid="$(tarball_id "$f")"; then
+    echo "cannot read package/package.json from ${f##*/}" >&2
+    exit 1
+  fi
+  names+=("${pkgid%%$'\t'*}")
+  vers+=("${pkgid##*$'\t'}")
+  files+=("$f")
+done
+
+# Every tarball must carry the same version.
+shared_version="${vers[0]}"
+for i in "${!vers[@]}"; do
+  if [ "${vers[$i]}" != "$shared_version" ]; then
+    echo "tarballs disagree on version: '${names[0]}' is $shared_version but '${names[$i]}' is ${vers[$i]}" >&2
+    exit 1
+  fi
+done
+
+# Exactly one launcher (bare name "olkcli"); its scope fixes the scope we expect
+# on the six platform packages.
+launcher_tgz=""
+launcher_name=""
+for i in "${!names[@]}"; do
+  if [ "${names[$i]##*/}" = "olkcli" ]; then
+    if [ -n "$launcher_tgz" ]; then
+      echo "found more than one launcher (olkcli) tarball" >&2
+      exit 1
+    fi
+    launcher_tgz="${files[$i]}"
+    launcher_name="${names[$i]}"
+  fi
+done
+if [ -z "$launcher_tgz" ]; then
+  echo "no launcher (olkcli) tarball found in $dir" >&2
+  exit 1
+fi
+case "$launcher_name" in
+  */*) scope_prefix="${launcher_name%/*}/" ;;
+  *)   scope_prefix="" ;;
+esac
+
+# Each of the six expected platform packages must be present exactly once, at
+# the launcher's scope.
+platform_tgz=()
+platform_names=()
+for p in "${expected_platforms[@]}"; do
+  want="${scope_prefix}${p}"
+  match=""
+  for i in "${!names[@]}"; do
+    if [ "${names[$i]}" = "$want" ]; then
+      if [ -n "$match" ]; then
+        echo "found more than one tarball named $want" >&2
+        exit 1
+      fi
+      match="${files[$i]}"
+    fi
+  done
+  if [ -z "$match" ]; then
+    echo "missing expected platform package: $want" >&2
+    exit 1
+  fi
+  platform_tgz+=("$match")
+  platform_names+=("$want")
+done
+
+# Launcher + six platforms = seven; any other count means an unexpected extra.
+if [ "${#tarballs[@]}" -ne 7 ]; then
+  echo "expected exactly 7 tarballs (1 launcher + 6 platform) in $dir, found ${#tarballs[@]}:" >&2
+  printf '  %s\n' "${names[@]}" >&2
+  exit 1
+fi
+
+echo "Version: $shared_version"
 echo "Binary packages (published first):"
-printf '  %s\n' "${platform_tgz[@]##*/}"
+printf '  %s\n' "${platform_names[@]}"
 echo "Launcher (published last):"
-echo "  ${launcher_tgz##*/}"
+echo "  $launcher_name"
 echo
 
+# A published version is immutable, so re-running after a partial bootstrap must
+# skip names already at $shared_version instead of aborting on the first one.
+already_published() {
+  local existing
+  existing="$(npm view "$1@$shared_version" version 2>/dev/null || true)"
+  [ "$existing" = "$shared_version" ]
+}
+
 publish() {
-  local f="$1"
+  local f="$1" name="$2"
+  if already_published "$name"; then
+    echo "skip $name@$shared_version (already published)"
+    return 0
+  fi
   local args=(publish "$f" --access public)
   [ -n "$tag" ] && args+=(--tag "$tag")
   if [ "$dry_run" -eq 1 ]; then
@@ -85,8 +202,10 @@ publish() {
   npm "${args[@]}"
 }
 
-for f in "${platform_tgz[@]}"; do publish "$f"; done
-publish "$launcher_tgz"
+for i in "${!platform_tgz[@]}"; do
+  publish "${platform_tgz[$i]}" "${platform_names[$i]}"
+done
+publish "$launcher_tgz" "$launcher_name"
 
 echo
 if [ "$dry_run" -eq 1 ]; then
