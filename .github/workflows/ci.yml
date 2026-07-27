@@ -5,6 +5,10 @@ on:
   push:
     branches:
       - main
+  # Lets a maintainer force a run from the Actions tab. Needed because this
+  # repository is a fork: forks start with their workflows suppressed, so
+  # having a manual trigger avoids pushing empty commits to get a run.
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -12,14 +16,18 @@ permissions:
 jobs:
   test:
     name: test
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Blacksmith runners are registered at the org level (runner group
+    # "Blacksmith runners", visibility: all). They also restore the Go build
+    # cache, which matters here: a cold cross-compile of this module costs
+    # ~8 min per target, a warm one ~3 s.
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 15
     steps:
       - name: Checkout
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: useblacksmith/checkout@6fd481652155169ed4d2f25ebaf97464f685175f # v1.1
 
       - name: Set up Go
-        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        uses: useblacksmith/setup-go@647ac649bd5b480f2a262e3e3e5f4d150ed452ad # v6.0.1
         with:
           go-version-file: go.mod
 
@@ -39,14 +47,14 @@ jobs:
 
   lint:
     name: lint
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 15
     steps:
       - name: Checkout
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: useblacksmith/checkout@6fd481652155169ed4d2f25ebaf97464f685175f # v1.1
 
       - name: Set up Go
-        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        uses: useblacksmith/setup-go@647ac649bd5b480f2a262e3e3e5f4d150ed452ad # v6.0.1
         with:
           go-version-file: go.mod
 
@@ -56,3 +64,31 @@ jobs:
           # Built with Go >= 1.26 so it can lint a module targeting go 1.26.x
           # (golangci-lint refuses a target newer than its own build toolchain).
           version: v2.11.4
+
+  package:
+    name: package
+    # Guards the npm distribution on every pull request rather than at tag
+    # time: builds a host binary, stamps + packs the wrapper packages, installs
+    # the tarballs, and runs `olk version` through the JS launcher. Covers both
+    # the unscoped upstream layout and the scoped fork layout.
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: useblacksmith/checkout@6fd481652155169ed4d2f25ebaf97464f685175f # v1.1
+
+      - name: Set up Go
+        uses: useblacksmith/setup-go@647ac649bd5b480f2a262e3e3e5f4d150ed452ad # v6.0.1
+        with:
+          go-version-file: go.mod
+
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: "24"
+
+      - name: Test npm packaging (pack, install, run)
+        run: bash scripts/test-npm-package.sh
+
+      - name: Verify the working tree is unchanged
+        run: git diff --exit-code

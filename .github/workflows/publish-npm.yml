@@ -1,0 +1,265 @@
+name: Publish (npm, @planmonster)
+
+# Publishes the fork's npm distribution: @planmonster/olkcli plus the six
+# @planmonster/olk-<os>-<arch> binary packages.
+#
+# Separate from release.yml on purpose. release.yml is the upstream pipeline
+# (Homebrew cask + unscoped npmjs names + MCP Registry) and cannot run here:
+# the unscoped names belong to upstream, TAP_GITHUB_TOKEN does not exist on
+# this fork, and io.github.rlrghb/outlook is not our MCP namespace.
+#
+# Trigger with a tag (npm-v0.9.5-pm.1) or from the Actions tab. The tag prefix
+# is "npm-v" so it does not also fire release.yml, which listens on "v*".
+
+on:
+  push:
+    tags:
+      - "npm-v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to publish (e.g. 0.9.5-pm.1)"
+        required: true
+        type: string
+      dry_run:
+        description: "Pack and validate only — do not publish"
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+env:
+  NPM_SCOPE: "@planmonster"
+  NPM_REGISTRY: "https://registry.npmjs.org"
+
+jobs:
+  version:
+    name: resolve version
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      dry_run: ${{ steps.v.outputs.dry_run }}
+    steps:
+      - name: Resolve version and mode
+        id: v
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            version="${{ inputs.version }}"
+            dry_run="${{ inputs.dry_run }}"
+          else
+            version="${GITHUB_REF_NAME#npm-v}"
+            dry_run="false"
+          fi
+          version="${version#v}"
+          # Refuse a bare upstream version. The fork must stay distinguishable
+          # from upstream olkcli releases even though the scope differs.
+          if ! printf '%s' "$version" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+-[0-9A-Za-z.-]+$'; then
+            echo "version '$version' must carry a fork suffix, e.g. 0.9.5-pm.1" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "dry_run=$dry_run" >> "$GITHUB_OUTPUT"
+          echo "publishing $version (dry_run=$dry_run)" >> "$GITHUB_STEP_SUMMARY"
+
+  build-linux-windows:
+    name: build linux + windows
+    needs: version
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: useblacksmith/checkout@6fd481652155169ed4d2f25ebaf97464f685175f # v1.1
+
+      - name: Set up Go
+        uses: useblacksmith/setup-go@647ac649bd5b480f2a262e3e3e5f4d150ed452ad # v6.0.1
+        with:
+          go-version-file: go.mod
+
+      - name: Cross-compile (CGO disabled)
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          CGO_ENABLED: "0"
+        run: |
+          set -euo pipefail
+          build() { # goos goarch outdir exe
+            echo "==> $1/$2"
+            mkdir -p "npm/$3/bin"
+            GOOS="$1" GOARCH="$2" go build \
+              -ldflags "-s -w \
+                -X github.com/rlrghb/olkcli/internal/cmd.Version=${VERSION} \
+                -X github.com/rlrghb/olkcli/internal/cmd.Commit=${GITHUB_SHA} \
+                -X github.com/rlrghb/olkcli/internal/cmd.Date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+              -o "npm/$3/bin/$4" ./cmd/olk
+          }
+          build linux   amd64 olk-linux-x64     olk
+          build linux   arm64 olk-linux-arm64   olk
+          build windows amd64 olk-win32-x64     olk.exe
+          build windows arm64 olk-win32-arm64   olk.exe
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: bin-linux-windows
+          path: npm/olk-*/bin/
+          retention-days: 1
+
+  build-darwin:
+    name: build darwin
+    needs: version
+    # Must stay on a GitHub-hosted macOS runner: the keyring backend needs
+    # CGO against the macOS Keychain, and Blacksmith supplies no macOS runners.
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: go.mod
+
+      - name: Build (CGO enabled)
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          CGO_ENABLED: "1"
+        run: |
+          set -euo pipefail
+          build() { # goarch outdir
+            echo "==> darwin/$1"
+            mkdir -p "npm/$2/bin"
+            GOOS=darwin GOARCH="$1" go build \
+              -ldflags "-s -w \
+                -X github.com/rlrghb/olkcli/internal/cmd.Version=${VERSION} \
+                -X github.com/rlrghb/olkcli/internal/cmd.Commit=${GITHUB_SHA} \
+                -X github.com/rlrghb/olkcli/internal/cmd.Date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+              -o "npm/$2/bin/olk" ./cmd/olk
+          }
+          build arm64 olk-darwin-arm64
+          build amd64 olk-darwin-x64
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: bin-darwin
+          path: npm/olk-*/bin/
+          retention-days: 1
+
+  publish:
+    name: publish to npm
+    needs: [version, build-linux-windows, build-darwin]
+    # Must stay on a GitHub-hosted runner. npm Trusted Publishing accepts
+    # cloud-hosted runners only; a Blacksmith runner presents itself as
+    # self-hosted in the OIDC claims and npm rejects it. This job only runs
+    # npm, so it does not need Blacksmith's speed.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      id-token: write # OIDC token for npm Trusted Publishing
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          # Trusted Publishing needs Node >= 22.14 and npm >= 11.5.1.
+          node-version: "24"
+          registry-url: ${{ env.NPM_REGISTRY }}
+          always-auth: true
+
+      - name: Upgrade npm
+        run: npm install -g npm@latest
+
+      - name: Download linux + windows binaries
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: bin-linux-windows
+          path: npm/
+
+      - name: Download darwin binaries
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: bin-darwin
+          path: npm/
+
+      - name: Verify all six binaries are present and executable
+        run: |
+          set -euo pipefail
+          chmod +x npm/olk-*/bin/olk npm/olk-*/bin/olk.exe 2>/dev/null || true
+          missing=0
+          for d in olk-linux-x64 olk-linux-arm64 olk-darwin-x64 olk-darwin-arm64; do
+            [ -x "npm/$d/bin/olk" ] || { echo "missing npm/$d/bin/olk" >&2; missing=1; }
+          done
+          for d in olk-win32-x64 olk-win32-arm64; do
+            [ -f "npm/$d/bin/olk.exe" ] || { echo "missing npm/$d/bin/olk.exe" >&2; missing=1; }
+          done
+          [ "$missing" -eq 0 ]
+          ls -l npm/olk-*/bin/*
+
+      - name: Smoke-test the linux binary
+        run: npm/olk-linux-x64/bin/olk version --json
+
+      - name: Stamp and pack (dry run)
+        if: ${{ needs.version.outputs.dry_run == 'true' }}
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          node scripts/build-npm.mjs "$VERSION" \
+            --scope "$NPM_SCOPE" --registry "$NPM_REGISTRY" \
+            --repository "$GITHUB_REPOSITORY"
+          mkdir -p dist-npm
+          npm pack --pack-destination dist-npm ./npm/olk-* ./npm/olk
+          ls -lh dist-npm
+          {
+            echo "### Dry run — nothing published"
+            echo '```'
+            ( cd dist-npm && ls -lh )
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload dry-run tarballs
+        if: ${{ needs.version.outputs.dry_run == 'true' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: npm-tarballs
+          path: dist-npm/*.tgz
+          retention-days: 7
+
+      - name: Stamp and publish
+        if: ${{ needs.version.outputs.dry_run != 'true' }}
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          # build-npm.mjs publishes the six binary packages first and the
+          # launcher last, so a consumer never sees a launcher whose optional
+          # dependencies are absent. It skips versions that already exist, so
+          # a re-run after a partial failure is safe.
+          node scripts/build-npm.mjs "$VERSION" \
+            --scope "$NPM_SCOPE" --registry "$NPM_REGISTRY" \
+            --repository "$GITHUB_REPOSITORY" --publish
+          echo "### Published $NPM_SCOPE/olkcli@$VERSION" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verify the published package installs and runs
+        if: ${{ needs.version.outputs.dry_run != 'true' }}
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          # The registry CDN caches for up to 5 minutes; retry before failing.
+          for i in 1 2 3 4 5 6; do
+            if npx -y "$NPM_SCOPE/olkcli@$VERSION" version --json; then
+              exit 0
+            fi
+            echo "not installable yet — retry $i" >&2
+            sleep 30
+          done
+          echo "published version did not become installable" >&2
+          exit 1
