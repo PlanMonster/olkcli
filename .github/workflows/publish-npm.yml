@@ -65,9 +65,39 @@ jobs:
           echo "dry_run=$dry_run" >> "$GITHUB_OUTPUT"
           echo "publishing $version (dry_run=$dry_run)" >> "$GITHUB_STEP_SUMMARY"
 
+  # Verify Trusted Publishing works for all seven packages BEFORE building
+  # anything. npm checks OIDC per package and swallows a failed exchange, so a
+  # missing publisher surfaces as a bare "404 Not Found - PUT" halfway through
+  # the release — after ~6 min of builds, and with some packages already
+  # published at a version that can never be reused.
+  preflight:
+    name: preflight (npm OIDC)
+    needs: version
+    # No job-level `if`: the build jobs depend on this one, and a *skipped*
+    # dependency skips them too. The check itself is gated per step instead, so
+    # a dry run still leaves this job green.
+    #
+    # Must be GitHub-hosted: npm Trusted Publishing rejects self-hosted OIDC.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Check every package can publish via OIDC
+        if: ${{ needs.version.outputs.dry_run != 'true' }}
+        run: bash scripts/preflight-npm-oidc.sh "$NPM_SCOPE" "$NPM_REGISTRY"
+
+      - name: Skipped (dry run publishes nothing)
+        if: ${{ needs.version.outputs.dry_run == 'true' }}
+        run: echo "dry run - no OIDC preflight needed"
+
   build-linux-windows:
     name: build linux + windows
-    needs: version
+    needs: [version, preflight]
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 30
     steps:
@@ -109,7 +139,7 @@ jobs:
 
   build-darwin:
     name: build darwin
-    needs: version
+    needs: [version, preflight]
     # Must stay on a GitHub-hosted macOS runner: the keyring backend needs
     # CGO against the macOS Keychain, and Blacksmith supplies no macOS runners.
     runs-on: macos-latest
@@ -151,7 +181,7 @@ jobs:
 
   publish:
     name: publish to npm
-    needs: [version, build-linux-windows, build-darwin]
+    needs: [version, preflight, build-linux-windows, build-darwin]
     # Must stay on a GitHub-hosted runner. npm Trusted Publishing accepts
     # cloud-hosted runners only; a Blacksmith runner presents itself as
     # self-hosted in the OIDC claims and npm rejects it. This job only runs
@@ -171,7 +201,6 @@ jobs:
           # Trusted Publishing needs Node >= 22.14 and npm >= 11.5.1.
           node-version: "24"
           registry-url: ${{ env.NPM_REGISTRY }}
-          always-auth: true
 
       - name: Upgrade npm
         run: npm install -g npm@latest
@@ -236,6 +265,10 @@ jobs:
         if: ${{ needs.version.outputs.dry_run != 'true' }}
         env:
           VERSION: ${{ needs.version.outputs.version }}
+          # npm logs a failed OIDC token exchange at verbose level and then
+          # silently falls back to the placeholder _authToken that setup-node
+          # writes, which the registry rejects as a 404. Surface the real cause.
+          NPM_CONFIG_LOGLEVEL: verbose
         run: |
           set -euo pipefail
           # build-npm.mjs publishes the six binary packages first and the
