@@ -8,6 +8,7 @@ import (
 	"time"
 	_ "time/tzdata"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/alecthomas/kong"
 
 	"github.com/rlrghb/olkcli/internal/config"
@@ -45,6 +46,14 @@ type RootFlags struct {
 	NoSend        bool `help:"Refuse sending mail or meeting invites" env:"OLK_NO_SEND"`
 	NoInput       bool `help:"Fail instead of prompting (headless/agent safety)" env:"OLK_NO_INPUT"`
 	WrapUntrusted bool `help:"Wrap external free-text in untrusted-content markers (JSON/plain output)" env:"OLK_WRAP_UNTRUSTED"`
+
+	// Injected access token. An external system owns the OAuth flow and supplies a
+	// short-lived delegated token; olk then never touches the keyring, never
+	// refreshes, and never persists the token. Prefer the environment variables:
+	// a command line is visible to other processes on the host.
+	AccessToken          string `help:"Delegated Graph access token; bypasses the keyring entirely (prefer OLK_ACCESS_TOKEN)" env:"OLK_ACCESS_TOKEN" name:"access-token"`
+	AccessTokenExpiresAt string `help:"RFC3339 expiry of the injected access token; a past value fails before any request" env:"OLK_ACCESS_TOKEN_EXPIRES_AT" name:"access-token-expires-at"`
+	AccountEmail         string `help:"Account identity hint (UPN) used for display when an access token is injected" env:"OLK_ACCOUNT_EMAIL" name:"account-email"`
 
 	// Command-scoping allow/deny lists (comma-separated dotted paths).
 	EnableCommands      string `help:"Allow only these command prefixes (csv; e.g. mail,calendar)" env:"OLK_ENABLE_COMMANDS"`
@@ -107,6 +116,17 @@ func (r *RunContext) GraphClient() (*graphapi.Client, error) {
 		return r.client, nil
 	}
 
+	// Token mode short-circuits account resolution: an external system supplied
+	// the credential, so the keyring, the account files, and the default-account
+	// config are never touched. This branch must stay above r.Store().
+	tm, err := newTokenMode(r.Flags)
+	if err != nil {
+		return nil, err
+	}
+	if tm != nil {
+		return r.newGraphClient(tm.credential())
+	}
+
 	store, err := r.Store()
 	if err != nil {
 		return nil, err
@@ -135,7 +155,15 @@ func (r *RunContext) GraphClient() (*graphapi.Client, error) {
 		return nil, fmt.Errorf("getting credentials: %w", err)
 	}
 
+	return r.newGraphClient(cred)
+}
+
+// newGraphClient builds, guards, and caches the Graph client for a credential.
+// Every credential source funnels through here, so a new authentication path can
+// never accidentally bypass the capability guards.
+func (r *RunContext) newGraphClient(cred azcore.TokenCredential) (*graphapi.Client, error) {
 	var client *graphapi.Client
+	var err error
 	if r.Flags.Verbose {
 		client, err = graphapi.NewClientVerbose(cred)
 	} else {
@@ -243,7 +271,7 @@ func Execute() int {
 	err := ctx.Run(runCtx)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %s\n", outfmt.SanitizeMultiline(err.Error()))
-		return 1
+		return exitCodeFor(err)
 	}
 	return 0
 }

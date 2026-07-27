@@ -336,6 +336,9 @@ export OLK_MAILBOX=boss@example.com
 | `--color auto\|never\|always` | `OLK_COLOR` | Color mode |
 | `--timeout SECONDS` | `OLK_TIMEOUT` | Request timeout (default 60) |
 | `--tz TIMEZONE` | `OLK_TIMEZONE` | IANA time zone for display (e.g. `America/New_York`) |
+| `--access-token TOKEN` | `OLK_ACCESS_TOKEN` | Use an injected Graph access token instead of a stored login: no keyring, no refresh, no persistence. `--account` is rejected in this mode; `--mailbox` still works |
+| `--access-token-expires-at TS` | `OLK_ACCESS_TOKEN_EXPIRES_AT` | RFC3339 expiry of the injected token. A past value exits **77** before any request — mint a fresh token and retry |
+| `--account-email EMAIL` | `OLK_ACCOUNT_EMAIL` | Identity hint (UPN) shown by `olk auth status` when a token is injected |
 
 ## Capability Guards (CLI, MCP, and scripts)
 
