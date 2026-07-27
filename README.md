@@ -93,13 +93,19 @@ brew install rlrghb/tap/olk
 
 ```bash
 # Install globally (provides the `olk` command)
-npm install -g olkcli
+npm install -g @planmonster/olkcli
 
 # …or run on demand without installing
-npx olkcli mail list
+npx @planmonster/olkcli mail list
 ```
 
-> The npm package is named **`olkcli`**; the installed binary is **`olk`**.
+> This fork publishes **`@planmonster/olkcli`**; the installed binary is **`olk`**.
+> Upstream publishes the unscoped **`olkcli`**. Pin an exact version in an agent
+> runner — every fork version carries a `-pm.N` suffix (e.g. `1.10.0-pm.1`), and
+> `@latest` makes a run non-reproducible. See [docs/npm-publishing.md](docs/npm-publishing.md).
+
+Only the binary for your platform is downloaded: the launcher is a ~2 KB JS shim
+and the binary ships in a per-platform optional dependency (~23 MB compressed).
 
 ### macOS notes
 
@@ -242,6 +248,41 @@ Notes:
 - `olk auth login|logout|clean|list` manage stored accounts and refuse to run while `OLK_ACCESS_TOKEN` is set. `olk auth status` reports the injected token.
 - Under `olk mcp`, every tool call rebuilds the credential from the environment, so the same variables apply with no extra configuration. Because the token is not refreshed, keep the server's lifetime shorter than the token's.
 - The token never appears in output, errors, verbose HTTP logs (the `Authorization` header is redacted), or the argv the MCP server builds.
+
+#### Ephemeral runner example (npx + injected token)
+
+No install step, no keyring, no configuration directory — suitable for a
+disposable sandbox driven by a control plane:
+
+```bash
+# The control plane mints the token, then starts the CLI. Pass the token in the
+# environment, never on the command line: argv is visible to other processes.
+env \
+  OLK_ACCESS_TOKEN="$GRAPH_TOKEN" \
+  OLK_ACCESS_TOKEN_EXPIRES_AT="$GRAPH_TOKEN_EXPIRY" \
+  OLK_ACCOUNT_EMAIL="user@example.com" \
+  OLK_JSON=1 OLK_NO_INPUT=1 OLK_CONCISE=1 \
+  OLK_NO_WRITE=1 OLK_NO_SEND=1 OLK_WRAP_UNTRUSTED=1 \
+  OLK_ENABLE_COMMANDS=mail,calendar \
+  npx -y @planmonster/olkcli@1.10.0-pm.1 mail list --json
+```
+
+Read the JSON envelope from stdout; `stderr` carries human hints only. Exit codes
+an orchestrator should branch on:
+
+| Exit | Meaning | Orchestrator action |
+|------|---------|---------------------|
+| `0` | success | parse stdout |
+| `77` | injected token expired, **no request was made** | mint a fresh token, retry |
+| `80` | usage error (bad flag or command) | fix the invocation; do not retry |
+| `1` | runtime failure (Graph error, network) | inspect stderr, retry if transient |
+
+For a tool-calling agent, run the MCP server instead — read-only by default, with
+untrusted-content wrapping forced on:
+
+```bash
+npx -y @planmonster/olkcli@1.10.0-pm.1 mcp
+```
 
 ### Custom App Registration
 
