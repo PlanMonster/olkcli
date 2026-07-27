@@ -154,6 +154,28 @@ A consumer therefore never sees a launcher whose optional dependencies are
 absent. The step skips a version that already exists, so a re-run after a
 partial failure is safe.
 
+## Troubleshooting
+
+**`npm view` returns 404 immediately after a publish.** This is normal. The full
+packument is the slowest read path to replicate — measured at ~3.5 minutes on the
+bootstrap publish, while the tarball, the version manifest, and the dist-tags
+endpoint all served immediately. Do not re-publish. Check a fast path instead:
+
+```sh
+curl -s "https://registry.npmjs.org/-/package/@planmonster%2folkcli/dist-tags"
+curl -s "https://registry.npmjs.org/-/v1/search?text=planmonster"
+```
+
+**`npm error code 128 ... git@github.com: Permission denied (publickey)`.** npm
+parsed a bare relative path such as `dist-npm/pkg.tgz` as the GitHub shorthand
+`<owner>/<repo>`. Pass an absolute path or a `./` prefix. `bootstrap-npm.sh`
+resolves this itself.
+
+**`You must specify a tag using --tag when publishing a prerelease version`.**
+Every fork version is a semver prerelease, so the dist-tag must be explicit.
+`build-npm.mjs` defaults it to `latest` and stamps `publishConfig.tag`; pass
+`--tag` to override.
+
 ## Consuming the package
 
 ### From a Daytona sandbox
