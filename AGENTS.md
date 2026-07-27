@@ -41,16 +41,20 @@
 
 ## CI
 
-- `.github/workflows/ci.yml` runs on every pull request and push to `main`.
-- The `test` job runs `go mod tidy` drift check → `go vet ./...` → `go build ./...` → `go test -race -count=1 ./...` on Ubuntu using the Go version pinned in `go.mod`.
-- The `lint` job runs `golangci-lint` v2.5.0 against `.golangci.yml`.
-- Both jobs use pinned action SHAs to match `release.yml` style.
+- `.github/workflows/ci.yml` runs on every pull request, on push to `main`, and via `workflow_dispatch` (manual trigger — this repo is a fork, and forks start with workflows suppressed).
+- The `test` job runs `go mod tidy` drift check → `go vet ./...` → `go build ./...` → `go test -race -count=1 ./...` using the Go version pinned in `go.mod`.
+- The `lint` job runs `golangci-lint` **v2.11.4** against `.golangci.yml`. Do not downgrade: golangci-lint refuses a module whose target Go version is newer than its own build toolchain, so v2.5.0 (built with go1.25) cannot lint this module (`go 1.26.4`).
+- The `package` job runs `scripts/test-npm-package.sh` — builds a host binary, stamps + packs the npm wrapper packages, installs the tarballs, and runs `olk version` through the JS launcher in both unscoped and scoped layouts. This makes npm packaging breakage a PR failure instead of a tag-time failure.
+- **Runners:** all Linux jobs use `blacksmith-4vcpu-ubuntu-2404` with `useblacksmith/checkout` + `useblacksmith/setup-go` (restored Go build cache: a cold cross-compile of this module costs ~8 min per target, warm ~3 s). Two exceptions, both deliberate: macOS jobs stay on `macos-latest` (Blacksmith has no macOS runners, and the darwin build needs CGO for the Keychain), and any **npm publish** job stays on `ubuntu-latest` (npm Trusted Publishing accepts cloud-hosted runners only; a Blacksmith runner reports itself as self-hosted in the OIDC claims).
+- All jobs use pinned action SHAs.
 
 ## Release & Distribution
 
 - A `vX.Y.Z` tag triggers `release.yml`, publishing to three channels: **Homebrew** (goreleaser → `rlrghb/tap` cask, with a quarantine-strip postflight), **npm** (the `olkcli` package + six `olk-<os>-<arch>` per-platform packages under `npm/`; `scripts/build-npm.mjs` stamps + publishes), and the **MCP Registry** (`server.json` → `io.github.rlrghb/outlook`, published via `mcp-publisher`).
 - **No publish secrets:** npm uses **Trusted Publishing (OIDC)** (`id-token: write`, npm ≥ 11.5.1, SLSA provenance); the registry uses GitHub OIDC. The npm package is `olkcli`; the binary is `olk`.
 - The official MCP registry has no in-place edit — `server.json` description/version changes apply on the **next release** (versions are CI-stamped from the tag). `npm-publish`/`registry-publish` are gated on the `PUBLISH_NPM` repo variable.
+- **Fork npm distribution (`@planmonster`) — `publish-npm.yml`, this fork only.** An `npm-vX.Y.Z-<suffix>` tag (or a `workflow_dispatch` with `dry_run`) builds all six binaries (linux/windows on Blacksmith with `CGO_ENABLED=0`; darwin on `macos-latest` with `CGO_ENABLED=1`) and publishes `@planmonster/olkcli` + six `@planmonster/olk-<os>-<arch>` packages to npmjs.org via Trusted Publishing. The tag prefix is `npm-v`, not `v`, so it does not also fire `release.yml`. Versions **must** carry a fork suffix (e.g. `0.9.5-pm.1`); the workflow rejects a bare `X.Y.Z` because upstream owns those numbers. `scripts/build-npm.mjs` gained `--scope`, `--registry`, `--repository`, `--access`, and `--skip-binary-check` (bootstrap only) — re-scoping is idempotent. See `docs/npm-publishing.md` for the one-time bootstrap (npm Trusted Publishing can only be configured on a package that already exists, so the seven names must be created by hand once).
+- `release.yml` is the **upstream** pipeline and cannot run on this fork: the unscoped npm names belong to upstream, `TAP_GITHUB_TOKEN` does not exist here, and `io.github.rlrghb/outlook` is not our MCP namespace. Leave it inert rather than repurposing it.
 - **ClawHub (OpenClaw skill) — manual, separate from the tag pipeline.** olk is listed on ClawHub as a **skill** from `SKILL.md`. Publish with the `clawhub` CLI (publisher `rlrghb`; `clawhub whoami` / `clawhub login`) from a folder containing **only `SKILL.md`** — `mkdir -p /tmp/olk-skill && cp SKILL.md /tmp/olk-skill/`, then `clawhub skill publish /tmp/olk-skill --slug olk --name Outlook --version <X.Y.Z> --tags calendar,contacts,drive,latest,mail,microsoft,onedrive,outlook,tasks --changelog '…'`. The skill version is **independent of the binary** — align it to the release. Display name is `Outlook` (pass `--name`; `SKILL.md`'s `name: olk` is only the slug). The summary comes from `SKILL.md` `description:`; **category** ("DATA & APIS") is web-UI only. **No `--dry-run`** — verify the live entry with `clawhub inspect olk` and confirm before publishing.
 
 ## Key Design Decisions
