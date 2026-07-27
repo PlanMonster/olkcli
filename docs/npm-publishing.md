@@ -42,6 +42,21 @@ The fork must use a version that carries a suffix, for example `1.10.0-pm.1`.
 npm registry data is immutable. You can never re-use a version number, even
 after an unpublish. Publish a new version to correct a defect.
 
+Because the suffix makes every version a semver **prerelease**, npm refuses to
+publish it unless a dist-tag is explicit:
+
+```
+npm error You must specify a tag using --tag when publishing a prerelease
+npm error version.
+```
+
+`build-npm.mjs` therefore defaults the tag to `latest` and stamps
+`publishConfig.tag` into every package, so a packed tarball is self-describing
+and `npm publish <tarball>` needs no flag. `latest` is the right tag here: every
+version of this fork is a prerelease, so without it `npm i @planmonster/olkcli`
+would have no tag to resolve. Pass `--tag <name>` to publish outside `latest`,
+for example a placeholder.
+
 ## One-time bootstrap (do this before the first release)
 
 npm Trusted Publishing can only be configured on a package that already exists.

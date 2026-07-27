@@ -8,7 +8,18 @@
 //   --registry <url>          publish/lookup against a non-default registry
 //   --repository owner/name   rewrite repository/homepage/bugs URLs
 //   --access public|restricted
-//   --tag <dist-tag>          publish under a dist-tag other than "latest"
+//   --tag <dist-tag>          dist-tag to publish under (default: latest)
+//
+// Every fork version carries a prerelease suffix (e.g. 1.10.0-pm.1), and npm
+// refuses to publish a prerelease unless the tag is explicit:
+//
+//   npm error You must specify a tag using --tag when publishing a
+//   prerelease version.
+//
+// The tag therefore defaults to "latest" and is also stamped into
+// publishConfig.tag. "latest" is correct for this fork because every version is
+// a prerelease by design: without it, `npm i @planmonster/olkcli` would have no
+// tag to resolve. Pass --tag to publish outside latest (e.g. a placeholder).
 //   --skip-binary-check       publish binary packages with no binary
 //                             (one-time bootstrap only — see
 //                             docs/npm-publishing.md)
@@ -65,12 +76,12 @@ const publish = argv.includes("--publish");
 const registry = flag("--registry") || process.env.NPM_REGISTRY;
 const repository = flag("--repository") || process.env.NPM_REPOSITORY;
 const access = flag("--access") || process.env.NPM_ACCESS || "public";
-// A placeholder or pre-release publish must not claim the "latest" tag, or a
-// consumer running `npm i <pkg>` receives it. An explicit `--tag` must carry a
-// real value: reject a missing or option-like one rather than silently falling
-// back to NPM_TAG or forwarding the next flag (e.g. `--tag --publish`) as a
-// dist-tag.
-const distTag = requireValue("--tag") || process.env.NPM_TAG || "";
+// npm refuses to publish a prerelease version unless the tag is explicit, and
+// every version of this fork is a prerelease, so default to "latest" instead of
+// leaving it unset. An explicit `--tag` must carry a real value: reject a
+// missing or option-like one rather than silently falling back to NPM_TAG or
+// forwarding the next flag (e.g. `--tag --publish`) as a dist-tag.
+const distTag = requireValue("--tag") || process.env.NPM_TAG || "latest";
 // npm Trusted Publishing can only be configured on a package that already
 // exists, so the very first publish of each name has to happen by hand and may
 // carry no binary. Never set this in the release workflow.
@@ -102,6 +113,12 @@ function stamp(pkgDir, mutate) {
   }
   if (registry) {
     json.publishConfig = { ...(json.publishConfig || {}), registry, access };
+  }
+  // Stamp the tag so a packed tarball is self-describing: `npm publish
+  // <tarball>` then satisfies npm's prerelease check with no flag at the call
+  // site, which is what the manual bootstrap does.
+  if (distTag) {
+    json.publishConfig = { ...(json.publishConfig || {}), tag: distTag };
   }
   if (mutate) mutate(json);
   writeFileSync(p, JSON.stringify(json, null, 2) + "\n");

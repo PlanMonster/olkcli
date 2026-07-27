@@ -37,7 +37,11 @@ dir="$(cd "$dir" && pwd)"
 shift
 
 dry_run=0
-tag=""
+# Every fork version carries a prerelease suffix, and npm refuses to publish a
+# prerelease unless a tag is explicit ("You must specify a tag using --tag when
+# publishing a prerelease version"). Default to latest so `npm i` resolves; pass
+# --tag to override.
+tag="latest"
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) dry_run=1 ;;
