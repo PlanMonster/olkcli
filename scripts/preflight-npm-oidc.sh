@@ -77,7 +77,10 @@ for p in "${packages[@]}"; do
     -H "Content-Length: 0" \
     "${registry}/-/npm/v1/oidc/token/exchange/package/${escaped}")"
 
-  if [ "$code" = "200" ] && grep -q '"token"' "$body"; then
+  # npm currently returns 201 Created for a successful exchange. Accept any
+  # successful 2xx response so the preflight follows HTTP semantics rather
+  # than depending on one registry implementation detail.
+  if [[ "$code" =~ ^2[0-9]{2}$ ]] && grep -q '"token"' "$body"; then
     printf '  %-34s READY\n' "$full"
   else
     msg="$(node -e '
