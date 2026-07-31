@@ -155,6 +155,17 @@ olk contacts list
 
 Results go to **stdout**; errors, prompts, and diagnostics go to **stderr** — so `olk … --json | jq` (or an agent reading stdout) stays clean even when a prompt or warning fires.
 
+In JSON mode, a failed command exits non-zero and writes a message-free error
+envelope to stdout:
+
+```json
+{"error":{"code":"ErrorItemNotFound","status":404}}
+```
+
+Provider failures retain the Microsoft Graph error code and HTTP status. Local
+command failures use `CommandFailed` and status `0`. Human-readable mode keeps
+its sanitized error text on stderr.
+
 ### JSON Envelope
 
 ```bash
@@ -178,8 +189,42 @@ olk mail list --json --results-only | jq '.[0].subject'
 ### Field Selection
 
 ```bash
-olk mail list --select from,subject
+olk mail list --json --select id,from,subject,receivedDateTime
 ```
+
+For `mail list --json`, `--select` is both a Microsoft Graph projection and a
+JSON output projection: each result contains only the requested fields.
+Supported fields are `id`, `subject`, `from`, `toRecipients` (rendered as
+`to`), `ccRecipients` (rendered as `cc`), `bccRecipients` (rendered as
+`bcc`), `replyTo`, `receivedDateTime`, `isRead`, `hasAttachments`,
+`bodyPreview`, `categories`, and `conversationId`. Empty, duplicate, unknown,
+or unrenderable fields are rejected before any Graph request. Without
+`--select`, default JSON list output includes all recipient classes (`to`,
+`cc`, `bcc`, and `replyTo`) so callers can preserve complete message evidence.
+
+### Bounded Mail Lists
+
+```bash
+# Return at most 1,000 inbox messages, oldest first
+olk mail list --folder inbox --top 1000 --order oldest --json --results-only
+```
+
+`--order` accepts `newest` (the default) or `oldest`. `--top` is the total
+result bound for the command, not a per-page size: `olk` follows provider pages
+internally until it reaches that bound or Microsoft Graph returns a terminal
+page. A terminal page before the bound is a successful short result containing
+every available matching message.
+
+`--order` cannot be combined with `--focused` or `--other`. Those
+classification filters use Microsoft Graph's provider order; `olk` does not
+fall back to client-side sorting, expose a raw Graph response, or return a
+partial or guessed ordering.
+
+Provider continuation URLs remain opaque and internal. A completed `mail list`
+JSON envelope therefore has an empty `nextLink`; raw continuations are never
+exposed for callers to replay. Traversal fails closed: an invalid, unexpected,
+non-progressing, or repeated continuation, a duplicate or missing message ID,
+cancellation, or a request failure returns an error and no partial list.
 
 ## Authentication
 
@@ -344,7 +389,7 @@ For common workflows, `olk` provides top-level shortcuts:
 | `--dry-run` | `OLK_DRY_RUN` | Dry run mode |
 | `--force` | `OLK_FORCE` | Skip confirmations |
 | `--color auto\|never\|always` | `OLK_COLOR` | Color mode |
-| `--select FIELDS` | `OLK_SELECT` | Field projection (table/plain output) |
+| `--select FIELDS` | `OLK_SELECT` | Command-specific field projection; `mail list --json` projects both the Graph request and JSON result |
 | `--concise` | `OLK_CONCISE` | Drop large free-text (bodies, previews, attendee lists) from JSON output |
 | `--results-only` | `OLK_RESULTS_ONLY` | Unwrap JSON envelope |
 | `--tz TIMEZONE` | `OLK_TIMEZONE` | IANA time zone for display (e.g. `America/New_York`) |
@@ -352,6 +397,7 @@ For common workflows, `olk` provides top-level shortcuts:
 | `--no-send` | `OLK_NO_SEND` | Refuse sending mail or meeting invites |
 | `--no-input` | `OLK_NO_INPUT` | Fail instead of prompting (headless/agent safety) |
 | `--wrap-untrusted` | `OLK_WRAP_UNTRUSTED` | Wrap external free-text in untrusted-content markers (JSON/plain) |
+| `--immutable-ids` | `OLK_IMMUTABLE_IDS` | Return Outlook item IDs that remain stable across moves within the same mailbox |
 | `--enable-commands CSV` | `OLK_ENABLE_COMMANDS` | Allow only these command prefixes (e.g. `mail,calendar`) |
 | `--enable-commands-exact CSV` | `OLK_ENABLE_COMMANDS_EXACT` | Allow only these exact command paths (e.g. `mail.list,mail.get`) |
 | `--disable-commands CSV` | `OLK_DISABLE_COMMANDS` | Block these command paths (overrides allows) |
@@ -394,7 +440,7 @@ The curated surface is **61 tools across 4 tiers** — 38 read · 12 safe-write 
   - **To Do:** `todo_lists_list`, `todo_list`, `todo_get`, `todo_checklist_list`, `todo_links_list`
   - **Directory & meta:** `people_search`, `changes`, `whoami`, `version`
 - **Incremental sync (delta).** `mail_delta`, `calendar_delta`, and `contacts_delta` return only what changed since an opaque cursor token (the unified `changes` tool digests all three in one call, each with its own token). Pass an empty token for a fresh sync, then hand the returned token back next time; deletions come through as items with `"removed": true`. Tokens are validated to be Microsoft Graph URLs before reuse, so a model can't redirect an authenticated request elsewhere.
-- **Batch & threading.** `mail_batch` fetches up to 20 messages by id in a single Graph `$batch` round-trip (best-effort — an id that fails is omitted). `mail_thread` returns every message in a conversation (oldest first) given a `conversationId`, which `mail_list`/`mail_get` now include in their output.
+- **Batch & threading.** `mail_batch` fetches up to 20 messages by id in a single Graph `$batch` round-trip (best-effort — an id that fails is omitted). `mail_thread` returns messages in a conversation (oldest first) given a `conversationId`, which `mail_list`/`mail_get` now include in their output. Add `--complete` when the caller must consume every provider page rather than accept the default bounded result.
 - **Opt into safe writes per-tool** by naming each one: `olk mcp --allow-write mail_flag` (repeatable, or `OLK_MCP_ALLOW_WRITE=mail_flag,todo_update`). The eligible writes are all **non-send and either non-destructive or reversible** — nothing sends a message/invite and nothing is hard-deleted: `mail_drafts_create`, `mail_flag`, `mail_categorize`, `mail_mark`, `mail_move`, `mail_folders_create`, `mail_folders_rename`, `contacts_create`, `contacts_update`, `todo_create`, `todo_update`, `todo_complete`. Nothing is exposed by default; naming a write is a deliberate action separate from starting the server (defense in depth), and `--allow-tool write` can opt into the whole class at once.
 - **Send and delete are separate, harder opt-ins** — they are *not* covered by `--allow-write`. A tool that transmits to other people needs `--allow-send <tool>` (`mail_send`, `mail_reply`, `mail_forward`, `mail_drafts_send`, `calendar_respond`, `calendar_create`, `calendar_update`); a tool that hard-deletes needs `--allow-destructive <tool>` (`mail_delete`, `calendar_delete`, `contacts_delete`, `todo_delete`). Both tiers are off by default and **defense-in-depth gated**: `--no-send` hides (and the API layer vetoes) every send tool even when named, and `--no-write` hides/vetoes every send *and* destructive tool — so `olk mcp --no-send --allow-send mail_send` exposes nothing. Destructive tools are auto-confirmed (the MCP layer supplies the `--force` a human would type), because naming `--allow-destructive` is itself the deliberate confirmation.
 - **Narrow the exposed set with `--allow-tool`** (`OLK_MCP_ALLOW_TOOL`, repeatable/csv). Selectors are an exact name (`mail_list`), a prefix glob (`mail_*`, or `mail.*`), or a category (`read`, `write`, `all`). E.g. `olk mcp --allow-tool 'mail.*' --allow-tool calendar_events` exposes only the mail tools plus that one calendar tool. This narrows tools by name; it never grants a write that `--allow-write` hasn't already enabled.
@@ -432,10 +478,11 @@ olk auth status                                      Check token validity
 ### Mail
 
 ```
-olk mail list [-n 25] [-f FOLDER] [-u] [--from X] [--after DATE] [--before DATE] [--focused] [--other]
+olk mail list [-n 25] [-f FOLDER] [-u] [--from X] [--after DATE] [--before DATE] [--focused] [--other] [--order newest|oldest] [--select FIELDS]
+# --order cannot be combined with --focused or --other
 olk mail get <ID> [--format full|text|html]
 olk mail batch --id <ID> [--id <ID>]...                  Fetch up to 20 messages in one $batch request
-olk mail thread <CONVERSATION_ID> [-n 50]                List all messages in a conversation
+olk mail thread <CONVERSATION_ID> [-n 50] [--complete]   List messages in a conversation
 olk mail delta [-f FOLDER] [--token TOKEN] [-n N]        Incremental sync; returns changes + next token
 olk mail send --to X --subject Y [--body Z] [--cc X] [--bcc X] [--html] [--attach FILE] [--importance low|normal|high] [--read-receipt]
 olk mail search <QUERY> [-n 25]

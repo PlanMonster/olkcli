@@ -2,12 +2,19 @@ package graphapi
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/url"
 	"regexp"
 	"strings"
 
 	"github.com/microsoftgraph/msgraph-sdk-go/models"
 	"github.com/microsoftgraph/msgraph-sdk-go/users"
+)
+
+var (
+	errNilMailFolderResponse = errors.New("graph returned no mail folder response")
+	errNilMessageResponse    = errors.New("graph returned no message response")
 )
 
 // allowedOrderBy is the set of valid $orderby field values.
@@ -42,18 +49,29 @@ var allowedSelectFields = map[string]bool{
 
 // MailMessage is a simplified mail message for output
 type MailMessage struct {
-	ID             string   `json:"id"`
-	Subject        string   `json:"subject" untrusted:"true"`
-	From           string   `json:"from" untrusted:"true"`
-	To             []string `json:"to" untrusted:"true"`
-	ReceivedAt     string   `json:"receivedDateTime"`
-	IsRead         bool     `json:"isRead"`
-	HasAttachments bool     `json:"hasAttachments"`
-	BodyPreview    string   `json:"bodyPreview,omitempty" untrusted:"true" concise:"omit"`
-	Body           string   `json:"body,omitempty" untrusted:"true" concise:"omit"`
-	BodyType       string   `json:"bodyType,omitempty"`
-	Categories     []string `json:"categories,omitempty"`
-	ConversationID string   `json:"conversationId,omitempty"`
+	ID             string            `json:"id"`
+	ParentFolderID string            `json:"parentFolderId,omitempty"`
+	ChangeKey      string            `json:"changeKey,omitempty"`
+	Subject        string            `json:"subject" untrusted:"true"`
+	From           string            `json:"from" untrusted:"true"`
+	To             []string          `json:"to" untrusted:"true"`
+	Cc             []string          `json:"cc" untrusted:"true"`
+	Bcc            []string          `json:"bcc" untrusted:"true"`
+	ReplyTo        []string          `json:"replyTo" untrusted:"true"`
+	ReceivedAt     string            `json:"receivedDateTime"`
+	IsRead         bool              `json:"isRead"`
+	HasAttachments bool              `json:"hasAttachments"`
+	BodyPreview    string            `json:"bodyPreview,omitempty" untrusted:"true" concise:"omit"`
+	Body           string            `json:"body,omitempty" untrusted:"true" concise:"omit"`
+	BodyType       string            `json:"bodyType,omitempty"`
+	Categories     []string          `json:"categories,omitempty"`
+	ConversationID string            `json:"conversationId,omitempty"`
+	Flag           *MailFollowupFlag `json:"flag,omitempty"`
+}
+
+// MailFollowupFlag is the stable output shape for a provider follow-up flag.
+type MailFollowupFlag struct {
+	Status string `json:"status"`
 }
 
 // messageDetailSelect is the $select field set for a full single message (used by
@@ -61,15 +79,36 @@ type MailMessage struct {
 var messageDetailSelect = []string{
 	"id", "subject", "from", "toRecipients", "ccRecipients", "bccRecipients",
 	"receivedDateTime", "isRead", "hasAttachments", "body", "bodyPreview", "conversationId",
+	"parentFolderId", "changeKey", "flag",
 }
 
 // MailFolder is a simplified folder representation
 type MailFolder struct {
 	ID             string `json:"id"`
+	WellKnownName  string `json:"wellKnownName,omitempty"`
 	DisplayName    string `json:"displayName" untrusted:"true"`
 	TotalCount     int32  `json:"totalItemCount"`
 	UnreadCount    int32  `json:"unreadItemCount"`
 	ParentFolderID string `json:"parentFolderId,omitempty"`
+}
+
+// protectedWellKnownMailFolders is the canonical folder set used by guarded
+// mailbox moves. Each value is resolved through Graph's well-known-name route;
+// display names are never interpreted as identity.
+var protectedWellKnownMailFolders = map[string]bool{
+	"archive":      true,
+	"deleteditems": true,
+	"inbox":        true,
+	"junkemail":    true,
+}
+
+// MoveMessageReceipt is the stable provider-success result returned after
+// Graph has created the destination message.
+type MoveMessageReceipt struct {
+	SourceID string `json:"sourceId"`
+	ID       string `json:"id"`
+	Status   string `json:"status"`
+	Code     string `json:"code"`
 }
 
 // ListMessagesOptions for filtering messages
@@ -90,28 +129,28 @@ func (c *Client) ListMessages(ctx context.Context, target string, opts *ListMess
 	if opts == nil {
 		opts = &ListMessagesOptions{}
 	}
-	opts.Top = clampTop(opts.Top)
+	top := clampTop(opts.Top)
 
-	if opts.OrderBy == "" {
-		opts.OrderBy = "receivedDateTime desc"
+	hasInferenceClassification := strings.Contains(opts.Filter, "inferenceClassification")
+	if opts.OrderBy != "" && hasInferenceClassification {
+		return nil, fmt.Errorf("cannot combine orderBy with inferenceClassification filter")
 	}
-	if !allowedOrderBy[opts.OrderBy] {
-		return nil, fmt.Errorf("invalid orderBy value: %q", opts.OrderBy)
-	}
-
-	var config *users.ItemMessagesRequestBuilderGetRequestConfiguration
-
-	top := opts.Top
 	orderBy := opts.OrderBy
+	if orderBy == "" {
+		orderBy = "receivedDateTime desc"
+	}
+	if !allowedOrderBy[orderBy] {
+		return nil, fmt.Errorf("invalid orderBy value: %q", orderBy)
+	}
 
 	queryParams := &users.ItemMessagesRequestBuilderGetQueryParameters{
 		Top: &top,
 	}
 	// Microsoft Graph does not support $orderBy combined with $search, an
 	// inferenceClassification filter, or a conversationId filter ("restriction or
-	// sort order is too complex"). Callers that need ordering in those cases sort
-	// client-side.
-	skipOrderBy := opts.Search != "" || strings.Contains(opts.Filter, "inferenceClassification") || strings.Contains(opts.Filter, "conversationId")
+	// sort order is too complex"). Explicit classification ordering is rejected
+	// above; search and conversation callers retain their existing semantics.
+	skipOrderBy := opts.Search != "" || hasInferenceClassification || strings.Contains(opts.Filter, "conversationId")
 	if !skipOrderBy {
 		queryParams.Orderby = []string{orderBy}
 	}
@@ -127,13 +166,13 @@ func (c *Client) ListMessages(ctx context.Context, target string, opts *ListMess
 				return nil, fmt.Errorf("invalid select field: %q", f)
 			}
 		}
-		queryParams.Select = opts.Select
+		queryParams.Select = append([]string(nil), opts.Select...)
 	} else {
-		queryParams.Select = []string{"id", "subject", "from", "toRecipients", "receivedDateTime", "isRead", "hasAttachments", "bodyPreview", "categories", "conversationId"}
-	}
-
-	config = &users.ItemMessagesRequestBuilderGetRequestConfiguration{
-		QueryParameters: queryParams,
+		queryParams.Select = []string{
+			"id", "subject", "from", "toRecipients", "ccRecipients",
+			"bccRecipients", "replyTo", "receivedDateTime", "isRead",
+			"hasAttachments", "bodyPreview", "categories", "conversationId",
+		}
 	}
 
 	if opts.FolderID != "" {
@@ -153,25 +192,56 @@ func (c *Client) ListMessages(ctx context.Context, target string, opts *ListMess
 		if opts.Search != "" {
 			folderQueryParams.Search = &opts.Search
 		}
-		resp, err := c.targetUser(target).MailFolders().ByMailFolderId(opts.FolderID).Messages().Get(ctx, &users.ItemMailFoldersItemMessagesRequestBuilderGetRequestConfiguration{
-			QueryParameters: folderQueryParams,
-		})
+		messages, err := collectMessagePages(ctx, top,
+			func(ctx context.Context, pageTop int32) (messagePage, error) {
+				folderQueryParams.Top = &pageTop
+				resp, err := c.targetUser(target).MailFolders().ByMailFolderId(opts.FolderID).Messages().Get(ctx, &users.ItemMailFoldersItemMessagesRequestBuilderGetRequestConfiguration{
+					Headers:         c.messageIDHeaders(nil),
+					QueryParameters: folderQueryParams,
+				})
+				if err != nil {
+					return messagePage{}, err
+				}
+				if resp == nil {
+					return messagePage{}, errNilMessageResponse
+				}
+				return messagePage{Values: resp.GetValue(), NextLink: derefStr(resp.GetOdataNextLink())}, nil
+			},
+			func(ctx context.Context, nextLink string, _ int32) (messagePage, error) {
+				if err := validateGraphContinuation(nextLink, graphContinuationScope{
+					host:           defaultGraphAPIHost,
+					collectionPath: graphUserCollectionPath(target, "mailFolders/"+url.PathEscape(opts.FolderID)+"/messages"),
+				}); err != nil {
+					return messagePage{}, err
+				}
+				resp, err := users.NewItemMailFoldersItemMessagesRequestBuilder(nextLink, c.inner.GetAdapter()).Get(ctx, &users.ItemMailFoldersItemMessagesRequestBuilderGetRequestConfiguration{
+					Headers: c.messageIDHeaders(nil),
+				})
+				if err != nil {
+					return messagePage{}, err
+				}
+				if resp == nil {
+					return messagePage{}, errNilMessageResponse
+				}
+				return messagePage{Values: resp.GetValue(), NextLink: derefStr(resp.GetOdataNextLink())}, nil
+			},
+		)
 		if err != nil {
 			return nil, fmt.Errorf("listing messages: %w", err)
 		}
-		result := make([]MailMessage, 0, len(resp.GetValue()))
-		for _, msg := range resp.GetValue() {
+		result := make([]MailMessage, 0, len(messages))
+		for _, msg := range messages {
 			result = append(result, convertMessage(msg))
 		}
 		return result, nil
 	}
 
-	resp, err := c.targetUser(target).Messages().Get(ctx, config)
+	messages, err := c.collectUserMessagePages(ctx, target, top, false, queryParams)
 	if err != nil {
 		return nil, fmt.Errorf("listing messages: %w", err)
 	}
-	result := make([]MailMessage, 0, len(resp.GetValue()))
-	for _, msg := range resp.GetValue() {
+	result := make([]MailMessage, 0, len(messages))
+	for _, msg := range messages {
 		result = append(result, convertMessage(msg))
 	}
 	return result, nil
@@ -179,11 +249,17 @@ func (c *Client) ListMessages(ctx context.Context, target string, opts *ListMess
 
 // GetMessage returns a single message from the target mailbox, or the signed-in
 // user's mailbox when target is empty. See ListMessages for scope requirements.
-func (c *Client) GetMessage(ctx context.Context, target, messageID string) (*MailMessage, error) {
+func (c *Client) GetMessage(ctx context.Context, target, messageID string, preference MessageBodyPreference) (*MailMessage, error) {
 	if err := validateID(messageID, "message ID"); err != nil {
 		return nil, err
 	}
+	headers, options, contract, err := newMessageBodyResponseContract(preference)
+	if err != nil {
+		return nil, err
+	}
 	msg, err := c.targetUser(target).Messages().ByMessageId(messageID).Get(ctx, &users.ItemMessagesMessageItemRequestBuilderGetRequestConfiguration{
+		Headers: c.messageIDHeaders(headers),
+		Options: options,
 		QueryParameters: &users.ItemMessagesMessageItemRequestBuilderGetQueryParameters{
 			Select: messageDetailSelect,
 		},
@@ -191,8 +267,14 @@ func (c *Client) GetMessage(ctx context.Context, target, messageID string) (*Mai
 	if err != nil {
 		return nil, fmt.Errorf("getting message: %w", err)
 	}
+	if err := contract.verify(); err != nil {
+		return nil, fmt.Errorf("getting message: %w", err)
+	}
 	m := convertMessage(msg)
 	fillBody(&m, msg)
+	if err := verifyMessageBody(&m, preference); err != nil {
+		return nil, fmt.Errorf("getting message: %w", err)
+	}
 	return &m, nil
 }
 
@@ -328,24 +410,38 @@ func (c *Client) ForwardMessage(ctx context.Context, messageID, comment string, 
 	return nil
 }
 
-func (c *Client) MoveMessage(ctx context.Context, messageID, folderID string) error {
+func (c *Client) MoveMessage(ctx context.Context, messageID, folderID string) (*MoveMessageReceipt, error) {
 	if err := c.ensureWritable(); err != nil {
-		return err
+		return nil, err
 	}
 	if err := validateID(messageID, "message ID"); err != nil {
-		return err
+		return nil, err
 	}
 	if err := validateID(folderID, "folder ID"); err != nil {
-		return err
+		return nil, err
 	}
 	body := users.NewItemMessagesItemMovePostRequestBody()
 	body.SetDestinationId(&folderID)
 
-	_, err := c.inner.Me().Messages().ByMessageId(messageID).Move().Post(ctx, body, nil)
+	moved, err := c.inner.Me().Messages().ByMessageId(messageID).Move().Post(
+		ctx,
+		body,
+		&users.ItemMessagesItemMoveRequestBuilderPostRequestConfiguration{
+			Headers: c.messageIDHeaders(nil),
+		},
+	)
 	if err != nil {
-		return fmt.Errorf("move message: %w", err)
+		return nil, fmt.Errorf("move message: %w", err)
 	}
-	return nil
+	if moved == nil || moved.GetId() == nil || *moved.GetId() == "" {
+		return nil, fmt.Errorf("move message: %w", errNilMessageResponse)
+	}
+	return &MoveMessageReceipt{
+		SourceID: messageID,
+		ID:       *moved.GetId(),
+		Status:   "succeeded",
+		Code:     "move_succeeded",
+	}, nil
 }
 
 func (c *Client) DeleteMessage(ctx context.Context, messageID string) error {
@@ -394,24 +490,31 @@ func (c *Client) ListMailFolders(ctx context.Context, target string) ([]MailFold
 
 	folders := make([]MailFolder, 0, len(resp.GetValue()))
 	for _, f := range resp.GetValue() {
-		folder := MailFolder{
-			DisplayName: derefStr(f.GetDisplayName()),
-		}
-		if f.GetId() != nil {
-			folder.ID = *f.GetId()
-		}
-		if f.GetTotalItemCount() != nil {
-			folder.TotalCount = *f.GetTotalItemCount()
-		}
-		if f.GetUnreadItemCount() != nil {
-			folder.UnreadCount = *f.GetUnreadItemCount()
-		}
-		if f.GetParentFolderId() != nil {
-			folder.ParentFolderID = *f.GetParentFolderId()
-		}
-		folders = append(folders, folder)
+		folders = append(folders, convertMailFolder(f))
 	}
 	return folders, nil
+}
+
+// GetWellKnownMailFolder resolves one guarded move destination by its canonical
+// Graph identifier. It intentionally does not infer identity from localized or
+// user-editable display names.
+func (c *Client) GetWellKnownMailFolder(ctx context.Context, target, name string) (*MailFolder, error) {
+	if !protectedWellKnownMailFolders[name] {
+		return nil, fmt.Errorf("unsupported well-known mail folder %q", name)
+	}
+	value, err := c.targetUser(target).MailFolders().ByMailFolderId(name).Get(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("getting well-known folder %s: %w", name, err)
+	}
+	if value == nil {
+		return nil, fmt.Errorf("getting well-known folder %s: %w", name, errNilMailFolderResponse)
+	}
+	folder := convertMailFolder(value)
+	if folder.ID == "" {
+		return nil, fmt.Errorf("getting well-known folder %s: missing folder ID", name)
+	}
+	folder.WellKnownName = name
+	return &folder, nil
 }
 
 // CreateMailFolder creates a new mail folder.
@@ -660,9 +763,20 @@ func (c *Client) CategorizeMessage(ctx context.Context, messageID string, catego
 }
 
 func convertMessage(msg models.Messageable) MailMessage {
-	m := MailMessage{}
+	m := MailMessage{
+		To:      []string{},
+		Cc:      []string{},
+		Bcc:     []string{},
+		ReplyTo: []string{},
+	}
 	if msg.GetId() != nil {
 		m.ID = *msg.GetId()
+	}
+	if msg.GetParentFolderId() != nil {
+		m.ParentFolderID = *msg.GetParentFolderId()
+	}
+	if msg.GetChangeKey() != nil {
+		m.ChangeKey = *msg.GetChangeKey()
 	}
 	if msg.GetSubject() != nil {
 		m.Subject = *msg.GetSubject()
@@ -673,11 +787,10 @@ func convertMessage(msg models.Messageable) MailMessage {
 			m.From = *addr.GetAddress()
 		}
 	}
-	for _, r := range msg.GetToRecipients() {
-		if r.GetEmailAddress() != nil && r.GetEmailAddress().GetAddress() != nil {
-			m.To = append(m.To, *r.GetEmailAddress().GetAddress())
-		}
-	}
+	m.To = recipientAddresses(msg.GetToRecipients())
+	m.Cc = recipientAddresses(msg.GetCcRecipients())
+	m.Bcc = recipientAddresses(msg.GetBccRecipients())
+	m.ReplyTo = recipientAddresses(msg.GetReplyTo())
 	if msg.GetReceivedDateTime() != nil {
 		m.ReceivedAt = msg.GetReceivedDateTime().Format("2006-01-02T15:04:05Z")
 	}
@@ -696,7 +809,43 @@ func convertMessage(msg models.Messageable) MailMessage {
 	if msg.GetConversationId() != nil {
 		m.ConversationID = *msg.GetConversationId()
 	}
+	if flag := msg.GetFlag(); flag != nil && flag.GetFlagStatus() != nil {
+		m.Flag = &MailFollowupFlag{Status: flag.GetFlagStatus().String()}
+	}
 	return m
+}
+
+func recipientAddresses(recipients []models.Recipientable) []string {
+	result := make([]string, 0, len(recipients))
+	for _, recipient := range recipients {
+		if recipient.GetEmailAddress() != nil &&
+			recipient.GetEmailAddress().GetAddress() != nil {
+			result = append(
+				result,
+				*recipient.GetEmailAddress().GetAddress(),
+			)
+		}
+	}
+	return result
+}
+
+func convertMailFolder(value models.MailFolderable) MailFolder {
+	folder := MailFolder{
+		DisplayName: derefStr(value.GetDisplayName()),
+	}
+	if value.GetId() != nil {
+		folder.ID = *value.GetId()
+	}
+	if value.GetTotalItemCount() != nil {
+		folder.TotalCount = *value.GetTotalItemCount()
+	}
+	if value.GetUnreadItemCount() != nil {
+		folder.UnreadCount = *value.GetUnreadItemCount()
+	}
+	if value.GetParentFolderId() != nil {
+		folder.ParentFolderID = *value.GetParentFolderId()
+	}
+	return folder
 }
 
 // fillBody copies a message's body content and type into m (convertMessage only
