@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"time"
 
@@ -20,6 +21,9 @@ type ConfigSetCmd struct {
 }
 
 func (c *ConfigSetCmd) Run(ctx *RunContext) error {
+	if injectedAccessToken() != "" {
+		return errors.New("config set manages stored configuration and is unavailable when OLK_ACCESS_TOKEN is set")
+	}
 	cfg, err := ctx.Config()
 	if err != nil {
 		return err
@@ -49,6 +53,9 @@ type ConfigGetCmd struct {
 }
 
 func (c *ConfigGetCmd) Run(ctx *RunContext) error {
+	if injectedAccessToken() != "" {
+		return errors.New("config get reads stored configuration and is unavailable when OLK_ACCESS_TOKEN is set")
+	}
 	cfg, err := ctx.Config()
 	if err != nil {
 		return err

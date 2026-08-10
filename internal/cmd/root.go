@@ -2,7 +2,9 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -25,19 +27,20 @@ var (
 )
 
 type RootFlags struct {
-	JSON        bool   `help:"Output as JSON" env:"OLK_JSON"`
-	Plain       bool   `help:"Output as plain TSV" env:"OLK_PLAIN"`
-	Account     string `help:"Account email to use" env:"OLK_ACCOUNT"`
-	Mailbox     string `help:"Target a different user's mailbox via delegated access (requires Mail.Read.Shared at login)" env:"OLK_MAILBOX"`
-	Verbose     bool   `help:"Verbose output" short:"v" env:"OLK_VERBOSE"`
-	DryRun      bool   `help:"Dry run mode" env:"OLK_DRY_RUN"`
-	Force       bool   `help:"Force operation" env:"OLK_FORCE"`
-	Color       string `help:"Color mode: auto|never|always" default:"auto" env:"OLK_COLOR" enum:"auto,never,always"`
-	Select      string `help:"Comma-separated fields to output" env:"OLK_SELECT"`
-	ResultsOnly bool   `help:"Output only the results array (no envelope)" env:"OLK_RESULTS_ONLY"`
-	Concise     bool   `help:"Drop large free-text fields (message/event/task bodies, previews, attendee lists) from JSON output to reduce size" env:"OLK_CONCISE"`
-	Timeout     int    `help:"Request timeout in seconds" default:"60" env:"OLK_TIMEOUT"`
-	TimeZone    string `help:"IANA time zone for display (e.g. America/New_York, Local, UTC)" name:"tz" env:"OLK_TIMEZONE"`
+	JSON         bool         `help:"Output as JSON" env:"OLK_JSON"`
+	Plain        bool         `help:"Output as plain TSV" env:"OLK_PLAIN"`
+	Account      string       `help:"Account email to use" env:"OLK_ACCOUNT"`
+	Mailbox      string       `help:"Target a different user's mailbox via delegated access (requires Mail.Read.Shared at login)" env:"OLK_MAILBOX"`
+	Verbose      bool         `help:"Verbose output" short:"v" env:"OLK_VERBOSE"`
+	DryRun       bool         `help:"Dry run mode" env:"OLK_DRY_RUN"`
+	Force        bool         `help:"Force operation" env:"OLK_FORCE"`
+	Color        string       `help:"Color mode: auto|never|always" default:"auto" env:"OLK_COLOR" enum:"auto,never,always"`
+	Select       SelectFields `help:"Comma-separated fields to output" env:"OLK_SELECT"`
+	ResultsOnly  bool         `help:"Output only the results array (no envelope)" env:"OLK_RESULTS_ONLY"`
+	Concise      bool         `help:"Drop large free-text fields (message/event/task bodies, previews, attendee lists) from JSON output to reduce size" env:"OLK_CONCISE"`
+	Timeout      int          `help:"Request timeout in seconds" default:"60" env:"OLK_TIMEOUT"`
+	TimeZone     string       `help:"IANA time zone for display (e.g. America/New_York, Local, UTC)" name:"tz" env:"OLK_TIMEZONE"`
+	ImmutableIDs bool         `help:"Use Outlook IDs that remain stable across moves within one mailbox" name:"immutable-ids" env:"OLK_IMMUTABLE_IDS"`
 
 	// Capability guards (enforced for CLI, MCP, scripts, and --mailbox alike).
 	// Named --no-write rather than --read-only because `auth login --read-only`
@@ -47,18 +50,29 @@ type RootFlags struct {
 	NoInput       bool `help:"Fail instead of prompting (headless/agent safety)" env:"OLK_NO_INPUT"`
 	WrapUntrusted bool `help:"Wrap external free-text in untrusted-content markers (JSON/plain output)" env:"OLK_WRAP_UNTRUSTED"`
 
-	// Injected access token. An external system owns the OAuth flow and supplies a
-	// short-lived delegated token; olk then never touches the keyring, never
-	// refreshes, and never persists the token. Prefer the environment variables:
-	// a command line is visible to other processes on the host.
-	AccessToken          string `help:"Delegated Graph access token; bypasses the keyring entirely (prefer OLK_ACCESS_TOKEN)" env:"OLK_ACCESS_TOKEN" name:"access-token"`
+	// Injected access-token metadata. The token itself is deliberately read only
+	// from OLK_ACCESS_TOKEN so it can never be exposed through argv or Kong's
+	// help and schema models.
 	AccessTokenExpiresAt string `help:"RFC3339 expiry of the injected access token; a past value fails before any request" env:"OLK_ACCESS_TOKEN_EXPIRES_AT" name:"access-token-expires-at"`
-	AccountEmail         string `help:"Account identity hint (UPN) used for display when an access token is injected" env:"OLK_ACCOUNT_EMAIL" name:"account-email"`
+	AccountEmail         string `help:"Non-authoritative identity hint (UPN) used only for display when an access token is injected" env:"OLK_ACCOUNT_EMAIL" name:"account-email"`
 
 	// Command-scoping allow/deny lists (comma-separated dotted paths).
 	EnableCommands      string `help:"Allow only these command prefixes (csv; e.g. mail,calendar)" env:"OLK_ENABLE_COMMANDS"`
 	EnableCommandsExact string `help:"Allow only these exact command paths (csv; e.g. mail.list,mail.get)" env:"OLK_ENABLE_COMMANDS_EXACT"`
 	DisableCommands     string `help:"Block these command paths (csv; overrides allows)" env:"OLK_DISABLE_COMMANDS"`
+}
+
+// SelectFields records whether --select was supplied so an explicit empty
+// value can be rejected instead of being confused with an absent selection.
+type SelectFields struct {
+	Value string
+	Set   bool
+}
+
+func (s *SelectFields) UnmarshalText(value []byte) error {
+	s.Value = string(value)
+	s.Set = true
+	return nil
 }
 
 type RunContext struct {
@@ -176,16 +190,19 @@ func (r *RunContext) newGraphClient(cred azcore.TokenCredential) (*graphapi.Clie
 	// Capability guards apply at the client layer, so they cover every command
 	// path uniformly (CLI, MCP, scripts, delegated --mailbox).
 	client.SetGuards(r.Flags.NoWrite, r.Flags.NoSend)
+	client.SetImmutableIDs(r.Flags.ImmutableIDs)
 
 	r.client = client
 	return client, nil
 }
 
 // Timezone returns the resolved time.Location for display.
-// Precedence: --tz flag > OLK_TIMEZONE env > config file > Local.
+// Precedence: --tz flag > OLK_TIMEZONE env > config file > Local. Token mode
+// skips the config-file fallback so even incidental output formatting remains
+// isolated from stored account state.
 func (r *RunContext) Timezone() (*time.Location, error) {
 	tz := r.Flags.TimeZone
-	if tz == "" {
+	if tz == "" && injectedAccessToken() == "" {
 		if cfg, err := r.Config(); err == nil {
 			tz = cfg.GetTimezone()
 		}
@@ -202,7 +219,7 @@ func (r *RunContext) Printer() *outfmt.Printer {
 	if loc, err := r.Timezone(); err == nil {
 		tzName = loc.String()
 	}
-	return outfmt.NewPrinter(r.Flags.JSON, r.Flags.Plain, r.Flags.ResultsOnly, r.Flags.Select, tzName, r.Flags.WrapUntrusted, r.Flags.Concise)
+	return outfmt.NewPrinter(r.Flags.JSON, r.Flags.Plain, r.Flags.ResultsOnly, r.Flags.Select.Value, tzName, r.Flags.WrapUntrusted, r.Flags.Concise)
 }
 
 type CLI struct {
@@ -264,14 +281,50 @@ func Execute() int {
 	// Command allow/deny lists gate dispatch. Applies to the bare CLI; the MCP
 	// server reuses the same predicate to filter its tool registry.
 	if path := selectedCommandPath(ctx); !commandAllowed(&cli.RootFlags, path) {
-		fmt.Fprintf(os.Stderr, "Error: command %q is not allowed by --enable-commands/--disable-commands\n", strings.Join(path, " "))
+		writeCommandError(
+			cli.JSON,
+			fmt.Errorf(
+				"command %q is not allowed by --enable-commands/--disable-commands",
+				strings.Join(path, " "),
+			),
+			os.Stdout,
+			os.Stderr,
+		)
 		return 1
 	}
 
 	err := ctx.Run(runCtx)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %s\n", outfmt.SanitizeMultiline(err.Error()))
+		writeCommandError(cli.JSON, err, os.Stdout, os.Stderr)
 		return exitCodeFor(err)
 	}
 	return 0
+}
+
+func writeCommandError(
+	jsonMode bool,
+	err error,
+	stdout io.Writer,
+	stderr io.Writer,
+) {
+	if jsonMode {
+		code, status := graphapi.ErrorMetadata(err)
+		value := struct {
+			Error struct {
+				Code   string `json:"code"`
+				Status int    `json:"status"`
+			} `json:"error"`
+		}{}
+		value.Error.Code = code
+		value.Error.Status = status
+		if encodeErr := json.NewEncoder(stdout).Encode(value); encodeErr != nil {
+			fmt.Fprintln(stderr, "Error: JSON error output failed")
+		}
+		return
+	}
+	fmt.Fprintf(
+		stderr,
+		"Error: %s\n",
+		outfmt.SanitizeMultiline(err.Error()),
+	)
 }

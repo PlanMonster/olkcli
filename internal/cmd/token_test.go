@@ -52,6 +52,7 @@ func (s failStore) Keys() ([]string, error) {
 // to a throwaway config dir, so any stored-credential access is a test failure.
 func tokenRunContext(t *testing.T, flags *RootFlags) *RunContext {
 	t.Helper()
+	t.Setenv("OLK_ACCESS_TOKEN", sentinelToken)
 	t.Setenv("OLK_CONFIG_DIR", t.TempDir())
 	return &RunContext{Ctx: context.Background(), Flags: flags, store: failStore{t}}
 }
@@ -59,7 +60,7 @@ func tokenRunContext(t *testing.T, flags *RootFlags) *RunContext {
 // --- 11.1 credential selection ----------------------------------------------
 
 func TestTokenMode_SelectsStaticCredentialWithoutKeyring(t *testing.T) {
-	ctx := tokenRunContext(t, &RootFlags{AccessToken: sentinelToken})
+	ctx := tokenRunContext(t, &RootFlags{})
 
 	client, err := ctx.GraphClient()
 	if err != nil {
@@ -75,7 +76,7 @@ func TestTokenMode_SelectsStaticCredentialWithoutKeyring(t *testing.T) {
 }
 
 func TestTokenMode_GuardsStillApply(t *testing.T) {
-	ctx := tokenRunContext(t, &RootFlags{AccessToken: sentinelToken, NoWrite: true, NoSend: true})
+	ctx := tokenRunContext(t, &RootFlags{NoWrite: true, NoSend: true})
 
 	client, err := ctx.GraphClient()
 	if err != nil {
@@ -89,10 +90,12 @@ func TestTokenMode_GuardsStillApply(t *testing.T) {
 }
 
 func TestAccountMode_UnchangedWhenNoTokenSupplied(t *testing.T) {
+	t.Setenv("OLK_ACCESS_TOKEN", "")
 	if tm, err := newTokenMode(&RootFlags{}); err != nil || tm != nil {
 		t.Fatalf("expected account mode (nil, nil), got %v, %v", tm, err)
 	}
-	if tm, err := newTokenMode(&RootFlags{AccessToken: "   "}); err != nil || tm != nil {
+	t.Setenv("OLK_ACCESS_TOKEN", "   ")
+	if tm, err := newTokenMode(&RootFlags{}); err != nil || tm != nil {
 		t.Fatalf("whitespace-only token must mean account mode, got %v, %v", tm, err)
 	}
 }
@@ -101,7 +104,7 @@ func TestAccountMode_UnchangedWhenNoTokenSupplied(t *testing.T) {
 
 func TestTokenMode_ExpiredFailsClosed(t *testing.T) {
 	past := time.Now().Add(-time.Minute).UTC().Format(time.RFC3339)
-	ctx := tokenRunContext(t, &RootFlags{AccessToken: sentinelToken, AccessTokenExpiresAt: past})
+	ctx := tokenRunContext(t, &RootFlags{AccessTokenExpiresAt: past})
 
 	_, err := ctx.GraphClient()
 	if !errors.Is(err, errTokenExpired) {
@@ -114,9 +117,9 @@ func TestTokenMode_ExpiredFailsClosed(t *testing.T) {
 }
 
 func TestTokenMode_FutureExpiryIsUsedVerbatim(t *testing.T) {
+	t.Setenv("OLK_ACCESS_TOKEN", sentinelToken)
 	want := time.Now().Add(2 * time.Hour).UTC().Truncate(time.Second)
 	tm, err := newTokenMode(&RootFlags{
-		AccessToken:          sentinelToken,
 		AccessTokenExpiresAt: want.Format(time.RFC3339),
 	})
 	if err != nil {
@@ -135,7 +138,8 @@ func TestTokenMode_FutureExpiryIsUsedVerbatim(t *testing.T) {
 }
 
 func TestTokenMode_MissingExpiryGetsNominalLifetime(t *testing.T) {
-	tm, err := newTokenMode(&RootFlags{AccessToken: sentinelToken})
+	t.Setenv("OLK_ACCESS_TOKEN", sentinelToken)
+	tm, err := newTokenMode(&RootFlags{})
 	if err != nil {
 		t.Fatalf("newTokenMode: %v", err)
 	}
@@ -151,7 +155,8 @@ func TestTokenMode_MissingExpiryGetsNominalLifetime(t *testing.T) {
 }
 
 func TestTokenMode_MalformedExpiryIsRejectedWithoutEchoingToken(t *testing.T) {
-	_, err := newTokenMode(&RootFlags{AccessToken: sentinelToken, AccessTokenExpiresAt: "yesterday"})
+	t.Setenv("OLK_ACCESS_TOKEN", sentinelToken)
+	_, err := newTokenMode(&RootFlags{AccessTokenExpiresAt: "yesterday"})
 	if err == nil {
 		t.Fatal("expected an error for a malformed expiry")
 	}
@@ -186,9 +191,10 @@ func TestExitCodeFor(t *testing.T) {
 
 func TestTokenMode_WritesNothingToConfigDir(t *testing.T) {
 	dir := t.TempDir()
+	t.Setenv("OLK_ACCESS_TOKEN", sentinelToken)
 	t.Setenv("OLK_CONFIG_DIR", dir)
 
-	flags := &RootFlags{AccessToken: sentinelToken, AccountEmail: "user@corp.com"}
+	flags := &RootFlags{AccountEmail: "user@corp.com"}
 	ctx := &RunContext{Ctx: context.Background(), Flags: flags, store: failStore{t}}
 	if _, err := ctx.GraphClient(); err != nil {
 		t.Fatalf("GraphClient: %v", err)
@@ -215,17 +221,51 @@ func TestTokenMode_WritesNothingToConfigDir(t *testing.T) {
 	}
 }
 
+func TestTokenMode_DoesNotReadConfigForTimezoneOrConfigCommands(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(configPath, []byte(`{"timezone":"Pacific/Honolulu"}`), 0o644); err != nil {
+		t.Fatalf("write config sentinel: %v", err)
+	}
+	t.Setenv("OLK_ACCESS_TOKEN", sentinelToken)
+	t.Setenv("OLK_CONFIG_DIR", dir)
+
+	ctx := &RunContext{Ctx: context.Background(), Flags: &RootFlags{}}
+	loc, err := ctx.Timezone()
+	if err != nil {
+		t.Fatalf("Timezone: %v", err)
+	}
+	if loc != time.Local {
+		t.Fatalf("token-mode timezone = %q, want Local without config fallback", loc)
+	}
+	if err := (&ConfigGetCmd{Key: "timezone"}).Run(ctx); err == nil {
+		t.Fatal("config get must be unavailable in token mode")
+	}
+	if err := (&ConfigSetCmd{Key: "timezone", Value: "UTC"}).Run(ctx); err == nil {
+		t.Fatal("config set must be unavailable in token mode")
+	}
+
+	info, err := os.Stat(configPath)
+	if err != nil {
+		t.Fatalf("stat config sentinel: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o644 {
+		t.Fatalf("config file mode changed to %o, proving token mode touched it", got)
+	}
+}
+
 // --- 11.5 flag interplay -----------------------------------------------------
 
 func TestTokenMode_AccountFlagIsRejected(t *testing.T) {
-	_, err := newTokenMode(&RootFlags{AccessToken: sentinelToken, Account: "someone@corp.com"})
+	t.Setenv("OLK_ACCESS_TOKEN", sentinelToken)
+	_, err := newTokenMode(&RootFlags{Account: "someone@corp.com"})
 	if err == nil || !strings.Contains(err.Error(), "OLK_ACCESS_TOKEN") {
 		t.Fatalf("expected --account to be refused in token mode, got %v", err)
 	}
 }
 
 func TestTokenMode_MailboxStillResolves(t *testing.T) {
-	ctx := tokenRunContext(t, &RootFlags{AccessToken: sentinelToken, Mailbox: "shared@corp.com"})
+	ctx := tokenRunContext(t, &RootFlags{Mailbox: "shared@corp.com"})
 	if _, err := ctx.GraphClient(); err != nil {
 		t.Fatalf("GraphClient with --mailbox: %v", err)
 	}
@@ -238,8 +278,8 @@ func TestTokenMode_MailboxStillResolves(t *testing.T) {
 	}
 }
 
-func TestTokenMode_FlagBeatsEnv(t *testing.T) {
-	t.Setenv("OLK_ACCESS_TOKEN", "env-token")
+func TestTokenMode_AccessTokenIsEnvironmentOnly(t *testing.T) {
+	t.Setenv("OLK_ACCESS_TOKEN", sentinelToken)
 	t.Setenv("OLK_ACCESS_TOKEN_EXPIRES_AT", "")
 	t.Setenv("OLK_ACCOUNT", "")
 
@@ -248,30 +288,28 @@ func TestTokenMode_FlagBeatsEnv(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newKongParser: %v", err)
 	}
-	if _, err := k.Parse([]string{"--access-token", "flag-token", "version"}); err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
-	if cli.AccessToken != "flag-token" {
-		t.Fatalf("AccessToken = %q, want flag-token", cli.AccessToken)
+	if _, err := k.Parse([]string{"--access-token", sentinelToken, "version"}); err == nil {
+		t.Fatal("--access-token must not be accepted")
 	}
 
-	cli2 := &CLI{}
-	k2, err := newKongParser(cli2)
+	schema := flagSchema(leafByPath(t, "mail", "list"))
+	if _, ok := schema.Properties["access-token"]; ok {
+		t.Fatal("access-token must not appear in the Kong-derived MCP schema")
+	}
+
+	tm, err := newTokenMode(&cli.RootFlags)
 	if err != nil {
-		t.Fatalf("newKongParser: %v", err)
+		t.Fatalf("newTokenMode: %v", err)
 	}
-	if _, err := k2.Parse([]string{"version"}); err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
-	if cli2.AccessToken != "env-token" {
-		t.Fatalf("AccessToken = %q, want env-token", cli2.AccessToken)
+	if tm == nil || tm.token != sentinelToken {
+		t.Fatal("OLK_ACCESS_TOKEN did not activate token mode")
 	}
 }
 
 // --- 11.6 auth subcommands ---------------------------------------------------
 
 func TestAuthCommands_RefusedInTokenMode(t *testing.T) {
-	ctx := tokenRunContext(t, &RootFlags{AccessToken: sentinelToken, Force: true})
+	ctx := tokenRunContext(t, &RootFlags{Force: true})
 
 	cases := map[string]func() error{
 		"login":  func() error { return (&AuthLoginCmd{}).Run(ctx) },
@@ -298,7 +336,6 @@ func TestAuthCommands_RefusedInTokenMode(t *testing.T) {
 func TestAuthStatus_ReportsInjectedToken(t *testing.T) {
 	expiry := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
 	ctx := tokenRunContext(t, &RootFlags{
-		AccessToken:          sentinelToken,
 		AccountEmail:         "user@corp.com",
 		AccessTokenExpiresAt: expiry.Format(time.RFC3339),
 	})
@@ -315,7 +352,7 @@ func TestAuthStatus_ReportsInjectedToken(t *testing.T) {
 }
 
 func TestAuthStatus_UnknownIdentityWithoutHint(t *testing.T) {
-	ctx := tokenRunContext(t, &RootFlags{AccessToken: sentinelToken})
+	ctx := tokenRunContext(t, &RootFlags{})
 
 	out, _, err := captureStd(func() error { return (&AuthStatusCmd{}).Run(ctx) })
 	if err != nil {
@@ -330,7 +367,6 @@ func TestAuthStatus_UnknownIdentityWithoutHint(t *testing.T) {
 
 func TestTokenMode_TokenNeverPrinted(t *testing.T) {
 	ctx := tokenRunContext(t, &RootFlags{
-		AccessToken:  sentinelToken,
 		AccountEmail: "user@corp.com",
 		Verbose:      true,
 		DryRun:       true,
