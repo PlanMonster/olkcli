@@ -107,6 +107,13 @@ npx @planmonster/olkcli mail list
 Only the binary for your platform is downloaded: the launcher is a ~2 KB JS shim
 and the binary ships in a per-platform optional dependency (~23 MB compressed).
 
+### PlanMonster GitHub release assets
+
+Fork-owned `olk-pm-v*` releases provide checksummed native archives without
+publishing Homebrew, npm, or MCP Registry artifacts. NanoClaw can pin the Linux
+AMD64 archive directly. See the exact tag, asset, checksum, and release contract
+in [docs/github-releases.md](docs/github-releases.md).
+
 ### macOS notes
 
 Two macOS-specific things to know:
