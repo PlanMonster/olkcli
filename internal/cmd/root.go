@@ -50,13 +50,11 @@ type RootFlags struct {
 	NoInput       bool `help:"Fail instead of prompting (headless/agent safety)" env:"OLK_NO_INPUT"`
 	WrapUntrusted bool `help:"Wrap external free-text in untrusted-content markers (JSON/plain output)" env:"OLK_WRAP_UNTRUSTED"`
 
-	// Injected access token. An external system owns the OAuth flow and supplies a
-	// short-lived delegated token; olk then never touches the keyring, never
-	// refreshes, and never persists the token. Prefer the environment variables:
-	// a command line is visible to other processes on the host.
-	AccessToken          string `help:"Delegated Graph access token; bypasses the keyring entirely (prefer OLK_ACCESS_TOKEN)" env:"OLK_ACCESS_TOKEN" name:"access-token"`
+	// Injected access-token metadata. The token itself is deliberately read only
+	// from OLK_ACCESS_TOKEN so it can never be exposed through argv or Kong's
+	// help and schema models.
 	AccessTokenExpiresAt string `help:"RFC3339 expiry of the injected access token; a past value fails before any request" env:"OLK_ACCESS_TOKEN_EXPIRES_AT" name:"access-token-expires-at"`
-	AccountEmail         string `help:"Account identity hint (UPN) used for display when an access token is injected" env:"OLK_ACCOUNT_EMAIL" name:"account-email"`
+	AccountEmail         string `help:"Non-authoritative identity hint (UPN) used only for display when an access token is injected" env:"OLK_ACCOUNT_EMAIL" name:"account-email"`
 
 	// Command-scoping allow/deny lists (comma-separated dotted paths).
 	EnableCommands      string `help:"Allow only these command prefixes (csv; e.g. mail,calendar)" env:"OLK_ENABLE_COMMANDS"`
@@ -199,10 +197,12 @@ func (r *RunContext) newGraphClient(cred azcore.TokenCredential) (*graphapi.Clie
 }
 
 // Timezone returns the resolved time.Location for display.
-// Precedence: --tz flag > OLK_TIMEZONE env > config file > Local.
+// Precedence: --tz flag > OLK_TIMEZONE env > config file > Local. Token mode
+// skips the config-file fallback so even incidental output formatting remains
+// isolated from stored account state.
 func (r *RunContext) Timezone() (*time.Location, error) {
 	tz := r.Flags.TimeZone
-	if tz == "" {
+	if tz == "" && injectedAccessToken() == "" {
 		if cfg, err := r.Config(); err == nil {
 			tz = cfg.GetTimezone()
 		}

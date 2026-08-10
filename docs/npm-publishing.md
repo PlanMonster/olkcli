@@ -202,6 +202,10 @@ OLK_CONCISE=1
 OLK_ENABLE_COMMANDS=mail,calendar
 ```
 
+`OLK_ACCESS_TOKEN` is environment-only; olk deliberately has no
+`--access-token` option. `OLK_ACCOUNT_EMAIL` is a backward-compatible display
+hint, not an authoritative identity and never an authorization input.
+
 With an injected token the CLI reads no keyring and creates no configuration
 directory. If the token is expired, the CLI stops before the first request and
 returns exit code 77.

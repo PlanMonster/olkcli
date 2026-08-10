@@ -268,9 +268,9 @@ When an external system already owns the OAuth flow, hand `olk` a short-lived **
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `OLK_ACCESS_TOKEN` | yes | A delegated Microsoft Graph access token (bearer). Also available as `--access-token`, but prefer the variable: a command line is visible to other processes. |
+| `OLK_ACCESS_TOKEN` | yes | A delegated Microsoft Graph access token (bearer). This credential is environment-only: there is no command-line flag, so it cannot enter process arguments or Kong-generated help/schema output. |
 | `OLK_ACCESS_TOKEN_EXPIRES_AT` | no | RFC3339 expiry of that token (e.g. `2030-01-01T12:34:56Z`). A past value fails **before** any network call with exit code **77**, so a caller can mint a fresh token and retry. Omit it and Graph's `401` is the authority instead. |
-| `OLK_ACCOUNT_EMAIL` | no | Identity hint (UPN) shown by `olk auth status`. `olk whoami` still resolves the real profile from Graph. |
+| `OLK_ACCOUNT_EMAIL` | no | Backward-compatible, non-authoritative identity hint (UPN) shown by `olk auth status`. It is display metadata only and is never used for authorization; `olk whoami` resolves the real profile from Graph. |
 
 ```bash
 # In a CI job or sandbox: read-only, no prompts, no stored credentials.
@@ -289,7 +289,7 @@ The token must carry the Graph scopes for the commands you run (the same scopes 
 
 Notes:
 
-- `--account` selects among *stored* accounts, so it is rejected in this mode. Use `--mailbox` for delegated access, or `OLK_ACCOUNT_EMAIL` as a display hint.
+- `--account` selects among *stored* accounts, so it is rejected in this mode. Use `--mailbox` for delegated access, or `OLK_ACCOUNT_EMAIL` as a non-authoritative display hint. Systems such as NanoClaw must not use that hint for authorization.
 - `olk auth login|logout|clean|list` manage stored accounts and refuse to run while `OLK_ACCESS_TOKEN` is set. `olk auth status` reports the injected token.
 - Under `olk mcp`, every tool call rebuilds the credential from the environment, so the same variables apply with no extra configuration. Because the token is not refreshed, keep the server's lifetime shorter than the token's.
 - The token never appears in output, errors, verbose HTTP logs (the `Authorization` header is redacted), or the argv the MCP server builds.
@@ -478,9 +478,9 @@ For common workflows, `olk` provides top-level shortcuts:
 | `--enable-commands CSV` | `OLK_ENABLE_COMMANDS` | Allow only these command prefixes (e.g. `mail,calendar`) |
 | `--enable-commands-exact CSV` | `OLK_ENABLE_COMMANDS_EXACT` | Allow only these exact command paths (e.g. `mail.list,mail.get`) |
 | `--disable-commands CSV` | `OLK_DISABLE_COMMANDS` | Block these command paths (overrides allows) |
-| `--access-token TOKEN` | `OLK_ACCESS_TOKEN` | Use an injected Graph access token; bypasses the keyring entirely ([details](#access-token-injection-ci-containers-agent-sandboxes)) |
+| — | `OLK_ACCESS_TOKEN` | Environment-only injected Graph access token; bypasses the keyring entirely. There is deliberately no CLI flag ([details](#access-token-injection-ci-containers-agent-sandboxes)) |
 | `--access-token-expires-at TS` | `OLK_ACCESS_TOKEN_EXPIRES_AT` | RFC3339 expiry of the injected token; a past value exits 77 before any request |
-| `--account-email EMAIL` | `OLK_ACCOUNT_EMAIL` | Identity hint (UPN) displayed when a token is injected |
+| `--account-email EMAIL` | `OLK_ACCOUNT_EMAIL` | Non-authoritative identity hint (UPN) used only for display when a token is injected |
 | | `OLK_KEYRING_PASSWORD` | File-backend keyring password (for headless use) |
 
 These capability guards apply to **every** entry path — the bare CLI, scripts/CI, and the MCP server — so `OLK_NO_WRITE=1 olk --mailbox boss@example.com mail list` is a hard "read this mailbox, never write" guarantee.

@@ -3,6 +3,7 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -56,7 +57,7 @@ func newTokenMode(f *RootFlags) (*tokenMode, error) {
 	if f == nil {
 		return nil, nil
 	}
-	token := strings.TrimSpace(f.AccessToken)
+	token := injectedAccessToken()
 	if token == "" {
 		return nil, nil
 	}
@@ -82,6 +83,13 @@ func newTokenMode(f *RootFlags) (*tokenMode, error) {
 	}
 
 	return tm, nil
+}
+
+// injectedAccessToken reads the credential directly from the environment. The
+// token intentionally has no RootFlags field: Kong must never accept it in
+// process arguments or expose it in help or generated schemas.
+func injectedAccessToken() string {
+	return strings.TrimSpace(os.Getenv("OLK_ACCESS_TOKEN"))
 }
 
 // credential builds the azcore credential for the injected token. The Graph
@@ -130,7 +138,7 @@ func exitCodeFor(err error) int {
 // is injected. Call it before any keyring or config access so a refusal never
 // prompts for a keyring password.
 func refuseInTokenMode(f *RootFlags, cmd string) error {
-	if f == nil || strings.TrimSpace(f.AccessToken) == "" {
+	if f == nil || injectedAccessToken() == "" {
 		return nil
 	}
 	return fmt.Errorf("auth %s manages stored accounts and is unavailable when OLK_ACCESS_TOKEN is set", cmd)
