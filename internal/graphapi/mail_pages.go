@@ -203,12 +203,15 @@ const (
 	graphMessageDeltaCollection
 	graphCalendarViewDeltaCollection
 	graphContactsDeltaCollection
+	graphDriveSearchCollection
 )
 
 type graphCollectionRoute struct {
 	isMe      bool
 	userID    string
 	folderID  string
+	driveID   string
+	query     string
 	operation graphCollectionOperation
 }
 
@@ -243,6 +246,27 @@ func parseGraphCollectionRoute(path string) (graphCollectionRoute, bool) {
 		}
 		route.userID = userID
 		collection = segments[3:]
+	case strings.EqualFold(segments[1], "drives") && len(segments) == 4:
+		driveID, ok := graphPathSegment(segments[2])
+		if !ok || driveID == "" {
+			return graphCollectionRoute{}, false
+		}
+		operation, ok := graphPathSegment(segments[3])
+		if !ok {
+			return graphCollectionRoute{}, false
+		}
+		const searchPrefix = "search(q='"
+		if len(operation) <= len(searchPrefix) || !strings.EqualFold(operation[:len(searchPrefix)], searchPrefix) || !strings.HasSuffix(operation, "')") {
+			return graphCollectionRoute{}, false
+		}
+		query, ok := graphODataString(operation[len(searchPrefix) : len(operation)-2])
+		if !ok || query == "" {
+			return graphCollectionRoute{}, false
+		}
+		route.driveID = driveID
+		route.query = query
+		route.operation = graphDriveSearchCollection
+		return route, true
 	default:
 		return graphCollectionRoute{}, false
 	}
