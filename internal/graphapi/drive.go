@@ -350,19 +350,63 @@ func (c *Client) SearchDrive(ctx context.Context, driveID, query string, top int
 		return nil, fmt.Errorf("search query contains invalid characters")
 	}
 	top = clampTop(top)
-	resp, err := c.inner.Drives().ByDriveId(driveID).SearchWithQ(&query).Get(ctx, nil)
+	pageTop := top
+	resp, err := c.inner.Drives().ByDriveId(driveID).SearchWithQ(&query).GetAsSearchWithQGetResponse(ctx, &drives.ItemSearchWithQRequestBuilderGetRequestConfiguration{
+		QueryParameters: &drives.ItemSearchWithQRequestBuilderGetQueryParameters{Top: &pageTop},
+	})
 	if err != nil {
 		return nil, scopeUpgradeError("searching drive", err)
 	}
-	result := make([]DriveItem, 0, len(resp.GetValue()))
-	for _, d := range resp.GetValue() {
-		result = append(result, convertDriveItem(d))
+	if resp == nil {
+		return nil, fmt.Errorf("searching drive: Graph returned no response")
 	}
-	// Limit results to top
-	if int32(len(result)) > top {
-		result = result[:top]
+
+	result := make([]DriveItem, 0, top)
+	seenIDs := make(map[string]struct{})
+	seenLinks := make(map[string]struct{})
+	for {
+		values := resp.GetValue()
+		nextLink := derefStr(resp.GetOdataNextLink())
+		if len(values) == 0 && nextLink != "" {
+			return nil, fmt.Errorf("searching drive: continuation made no progress")
+		}
+		for _, value := range values {
+			if int32(len(result)) == top {
+				return result, nil
+			}
+			if value == nil || value.GetId() == nil || *value.GetId() == "" {
+				return nil, fmt.Errorf("searching drive: result has no item ID")
+			}
+			id := *value.GetId()
+			if _, exists := seenIDs[id]; exists {
+				return nil, fmt.Errorf("searching drive: duplicate item ID %q", id)
+			}
+			seenIDs[id] = struct{}{}
+			result = append(result, convertDriveItem(value))
+		}
+		if int32(len(result)) == top || nextLink == "" {
+			return result, nil
+		}
+		if _, exists := seenLinks[nextLink]; exists {
+			return nil, fmt.Errorf("searching drive: continuation repeated a previous URL")
+		}
+		seenLinks[nextLink] = struct{}{}
+		if err := validateGraphContinuation(nextLink, graphContinuationScope{
+			host:           defaultGraphAPIHost,
+			collectionPath: fmt.Sprintf("/v1.0/drives/%s/search(q='%s')", url.PathEscape(driveID), query),
+		}); err != nil {
+			return nil, fmt.Errorf("searching drive: %w", err)
+		}
+		// Graph continuation URLs are opaque. Follow the validated URL exactly
+		// as returned and enforce the caller's bound while collecting results.
+		resp, err = drives.NewItemSearchWithQRequestBuilder(nextLink, c.inner.GetAdapter()).GetAsSearchWithQGetResponse(ctx, nil)
+		if err != nil {
+			return nil, scopeUpgradeError("searching drive", err)
+		}
+		if resp == nil {
+			return nil, fmt.Errorf("searching drive: Graph returned no response")
+		}
 	}
-	return result, nil
 }
 
 // RecentDriveItems returns recently accessed items.
